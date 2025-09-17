@@ -9,9 +9,13 @@ local Players = game:GetService("Players")
 local PLACE_ID = 606849621 -- Jailbreak place ID
 local HOP_INTERVAL = 90 -- seconds (1.5 minutes)
 
--- Queue this script to run again after teleport
+-- Make this script reload itself after teleport
 if queue_on_teleport then
-    queue_on_teleport(game:HttpGet("https://yourserver.com/myhopper.lua")) -- replace with your own hosted link OR paste the whole script here
+    queue_on_teleport([[
+        -- Wait 5 seconds after teleport to let the game load fully
+        task.wait(5)
+        loadstring(game:HttpGet('https://raw.githubusercontent.com/UrFavPapiOnRoblox/Roblox-Basic-Cheats/refs/heads/main/Server%20Hopper'))()
+    ]])
 end
 
 local visitedServers = {}
@@ -53,8 +57,9 @@ local function findServer()
     return nil
 end
 
+print("[Server Hopper] Script loaded! First hop in " .. HOP_INTERVAL .. " seconds.")
+
 while true do
-    print("[Server Hopper] Waiting " .. HOP_INTERVAL .. " seconds before next hop...")
     task.wait(HOP_INTERVAL)
 
     local server = findServer()
