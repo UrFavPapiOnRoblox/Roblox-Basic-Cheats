@@ -1,25 +1,22 @@
--- Custom Jailbreak Server Hopper (Persistent)
--- Hops every 90 seconds to a new server with space available
--- Automatically re-executes after teleport
+print("[Server Hopper] Script started! Movement- and robbery-aware server hopping initialized.")
 
+local Players = game:GetService("Players")
+local LocalPlayer = Players.LocalPlayer
 local HttpService = game:GetService("HttpService")
 local TeleportService = game:GetService("TeleportService")
-local Players = game:GetService("Players")
+local Workspace = game:GetService("Workspace")
+
+-- Wait until character loads
+repeat task.wait() until LocalPlayer.Character
+local HumanoidRootPart = LocalPlayer.Character:WaitForChild("HumanoidRootPart")
 
 local PLACE_ID = 606849621 -- Jailbreak place ID
-local HOP_INTERVAL = 90 -- seconds (1.5 minutes)
-
--- Make this script reload itself after teleport
-if queue_on_teleport then
-    queue_on_teleport([[
-        -- Wait 5 seconds after teleport to let the game load fully
-        task.wait(5)
-        loadstring(game:HttpGet('https://raw.githubusercontent.com/UrFavPapiOnRoblox/Roblox-Basic-Cheats/refs/heads/main/Server%20Hopper'))()
-    ]])
-end
+local HOP_INTERVAL = 90 -- seconds
+local CHECK_INTERVAL = 1 -- seconds for checking movement/rob
 
 local visitedServers = {}
 
+-- Fetch list of public servers
 local function getServers(cursor)
     local url = "https://games.roblox.com/v1/games/"..PLACE_ID.."/servers/Public?sortOrder=Asc&limit=100"
     if cursor then
@@ -36,6 +33,7 @@ local function getServers(cursor)
     return nil
 end
 
+-- Find a suitable server to hop to
 local function findServer()
     local cursor = nil
     local servers = {}
@@ -57,18 +55,49 @@ local function findServer()
     return nil
 end
 
-print("[Server Hopper] Script loaded! First hop in " .. HOP_INTERVAL .. " seconds.")
+-- Check if the player is near airdrops or cargo crates
+local function isRobbing()
+    local hrp = HumanoidRootPart
 
-while true do
-    task.wait(HOP_INTERVAL)
-
-    local server = findServer()
-    if server then
-        visitedServers[server.id] = true
-        print(string.format("[Server Hopper] Hopping to new server: %s (%d/%d players)", server.id, server.playing, server.maxPlayers))
-        TeleportService:TeleportToPlaceInstance(PLACE_ID, server.id, Players.LocalPlayer)
-    else
-        warn("[Server Hopper] No available servers found. Retrying in 10 seconds...")
-        task.wait(10)
+    for _, obj in pairs(Workspace:GetChildren()) do
+        if (obj.Name == "Airdrop" or obj.Name == "CargoCrate") and (hrp.Position - obj.Position).Magnitude < 20 then
+            return true
+        end
     end
+
+    return false
 end
+
+-- Check if the player is moving
+local function isMoving()
+    return HumanoidRootPart.Velocity.Magnitude > 0.1
+end
+
+-- Main server hop loop
+task.spawn(function()
+    while true do
+        local timer = HOP_INTERVAL
+
+        while timer > 0 do
+            task.wait(CHECK_INTERVAL)
+
+            if isMoving() or isRobbing() then
+                timer = HOP_INTERVAL -- reset timer if moving or robbing
+                print("[Server Hopper] Movement or robbery detected, timer reset!")
+            else
+                timer = timer - CHECK_INTERVAL
+            end
+        end
+
+        -- Find and hop to a new server
+        local server = findServer()
+        if server then
+            visitedServers[server.id] = true
+            print(string.format("[Server Hopper] Hopping to server: %s (%d/%d players)", server.id, server.playing, server.maxPlayers))
+            TeleportService:TeleportToPlaceInstance(PLACE_ID, server.id, LocalPlayer)
+        else
+            warn("[Server Hopper] No available servers found. Retrying in 10 seconds...")
+            task.wait(10)
+        end
+    end
+end)
