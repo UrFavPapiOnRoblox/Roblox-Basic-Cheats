@@ -1,0 +1,69 @@
+-- Custom Jailbreak Server Hopper (Persistent)
+-- Hops every 90 seconds to a new server with space available
+-- Automatically re-executes after teleport
+
+local HttpService = game:GetService("HttpService")
+local TeleportService = game:GetService("TeleportService")
+local Players = game:GetService("Players")
+
+local PLACE_ID = 606849621 -- Jailbreak place ID
+local HOP_INTERVAL = 90 -- seconds (1.5 minutes)
+
+-- Queue this script to run again after teleport
+if queue_on_teleport then
+    queue_on_teleport(game:HttpGet("https://yourserver.com/myhopper.lua")) -- replace with your own hosted link OR paste the whole script here
+end
+
+local visitedServers = {}
+
+local function getServers(cursor)
+    local url = "https://games.roblox.com/v1/games/"..PLACE_ID.."/servers/Public?sortOrder=Asc&limit=100"
+    if cursor then
+        url = url .. "&cursor=" .. cursor
+    end
+
+    local success, response = pcall(function()
+        return game:HttpGet(url)
+    end)
+
+    if success then
+        return HttpService:JSONDecode(response)
+    end
+    return nil
+end
+
+local function findServer()
+    local cursor = nil
+    local servers = {}
+
+    repeat
+        local data = getServers(cursor)
+        if not data then break end
+        for _, server in ipairs(data.data) do
+            if server.playing < server.maxPlayers and not visitedServers[server.id] then
+                table.insert(servers, server)
+            end
+        end
+        cursor = data.nextPageCursor
+    until not cursor
+
+    if #servers > 0 then
+        return servers[math.random(1, #servers)]
+    end
+    return nil
+end
+
+while true do
+    print("[Server Hopper] Waiting " .. HOP_INTERVAL .. " seconds before next hop...")
+    task.wait(HOP_INTERVAL)
+
+    local server = findServer()
+    if server then
+        visitedServers[server.id] = true
+        print(string.format("[Server Hopper] Hopping to new server: %s (%d/%d players)", server.id, server.playing, server.maxPlayers))
+        TeleportService:TeleportToPlaceInstance(PLACE_ID, server.id, Players.LocalPlayer)
+    else
+        warn("[Server Hopper] No available servers found. Retrying in 10 seconds...")
+        task.wait(10)
+    end
+end
