@@ -1,0 +1,2499 @@
+local Players = game:GetService("Players") 
+local UserInputService = game:GetService("UserInputService") 
+local RunService = game:GetService("RunService") 
+local VirtualInputManager = game:GetService("VirtualInputManager") 
+
+local player = Players.LocalPlayer 
+if not player then 
+	error("LocalPlayer is nil - script must be run as a LocalScript in PlayerGui or StarterPlayer") 
+end 
+
+-- Wait for PlayerGui to load 
+local playerGui = player:WaitForChild("PlayerGui", 10) 
+if not playerGui then 
+	error("PlayerGui not found!") 
+end 
+
+local flySpeed = 25 
+local floatName = "FloatPart" 
+
+-- Cached data 
+local computers = {} 
+local isFlying = false 
+local Clip = true 
+local Noclipping = nil 
+local healthSafetyEnabled = true 
+local stayConnection = nil 
+local autoFarmEnabled = false 
+local espEnabled = true 
+local espObjects = {} -- Track ESP highlights 
+local isHidden = false 
+local hideConnection = nil 
+local isManualFlying = false 
+local manualFlyConnection = nil 
+local animatronicDetectionEnabled = true 
+local animatronicCheckConnection = nil 
+local detectionRadius = 60 -- Distance in studs to trigger escape (increased for earlier detection) 
+local detectedAnimatronics = {} -- Track which players are animatronics 
+local lastEscapeTime = 0 
+local escapeCooldown = 2 -- Cooldown between escapes in seconds 
+local currentEPressLoop = nil -- Track current E press loop 
+local compHideEnabled = false -- Computer hiding feature
+local blacklistedComputers = {} -- Track computers being camped by animatronics
+local lastAttemptedPosition = {} -- Track which position we last tried at each computer 
+
+-- Heartbeat automation variables 
+local autoHeartbeatEnabled = true 
+local puzzleStartTime = nil 
+local trackedBeats = {} 
+local clickedBeats = {} 
+local clickCount = 0 
+local hitLineX = nil 
+local beatConnection = nil 
+local beatIdCounter = 0 
+
+-- Base colors for snake glow 
+local COMPUTER_COLOR = Color3.fromRGB(100, 200, 255)    -- Static Light Blue 
+local PLAYER_BASE = Color3.fromRGB(220, 20, 60)        -- Cherry Red 
+local PLAYER_GLOW = Color3.fromRGB(255, 100, 100)      -- Light Cherry Red 
+
+-- Get snake glow color (smooth gradient) 
+local function getSnakeColor(baseColor, glowColor, progress) 
+	local alpha = (math.sin(progress * math.pi * 2) + 1) / 2 
+	return baseColor:Lerp(glowColor, alpha) 
+end 
+
+-- Create blackout overlay GUI that excludes the heartbeat puzzle 
+local blackoutGui = Instance.new("ScreenGui") 
+blackoutGui.Name = "HeartbeatBlackout" 
+blackoutGui.ResetOnSpawn = false 
+blackoutGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling 
+blackoutGui.DisplayOrder = 9999 -- Below the heartbeat GUI 
+blackoutGui.Enabled = true 
+blackoutGui.Parent = playerGui 
+
+-- Create 4 black panels that surround the heartbeat box 
+local topPanel = Instance.new("Frame") 
+topPanel.Name = "TopBlackout" 
+topPanel.BackgroundColor3 = Color3.fromRGB(0, 0, 0) 
+topPanel.BackgroundTransparency = 1 
+topPanel.BorderSizePixel = 0 
+topPanel.Visible = false 
+topPanel.Parent = blackoutGui 
+
+local bottomPanel = Instance.new("Frame") 
+bottomPanel.Name = "BottomBlackout" 
+bottomPanel.BackgroundColor3 = Color3.fromRGB(0, 0, 0) 
+bottomPanel.BackgroundTransparency = 1 
+bottomPanel.BorderSizePixel = 0 
+bottomPanel.Visible = false 
+bottomPanel.Parent = blackoutGui 
+
+local leftPanel = Instance.new("Frame") 
+leftPanel.Name = "LeftBlackout" 
+leftPanel.BackgroundColor3 = Color3.fromRGB(0, 0, 0) 
+leftPanel.BackgroundTransparency = 1 
+leftPanel.BorderSizePixel = 0 
+leftPanel.Visible = false 
+leftPanel.Parent = blackoutGui 
+
+local rightPanel = Instance.new("Frame") 
+rightPanel.Name = "RightBlackout" 
+rightPanel.BackgroundColor3 = Color3.fromRGB(0, 0, 0) 
+rightPanel.BackgroundTransparency = 1 
+rightPanel.BorderSizePixel = 0 
+rightPanel.Visible = false 
+rightPanel.Parent = blackoutGui 
+
+print("🖤 Selective blackout GUI created") 
+
+local function enableBlackout() 
+	-- DISABLED FOR NOW - Let's see the game while debugging 
+	print("🖤 Blackout DISABLED for debugging Beat detection") 
+end 
+
+local function disableBlackout() 
+	topPanel.Visible = false 
+	bottomPanel.Visible = false 
+	leftPanel.Visible = false 
+	rightPanel.Visible = false 
+	topPanel.BackgroundTransparency = 1 
+	bottomPanel.BackgroundTransparency = 1 
+	leftPanel.BackgroundTransparency = 1 
+	rightPanel.BackgroundTransparency = 1 
+	print("🖤 Blackout disabled") 
+end 
+
+
+
+-- Heartbeat automation functions 
+local function simulateClick() 
+	VirtualInputManager:SendMouseButtonEvent(0, 0, 0, true, game, 0) 
+	task.wait(0.05) 
+	VirtualInputManager:SendMouseButtonEvent(0, 0, 0, false, game, 0) 
+end 
+
+local function moveCursorToPosition(x, y) 
+	VirtualInputManager:SendMouseMoveEvent(x, y, game) 
+end 
+
+local function isHeartbeatActive() 
+	local heartbeatGui = playerGui:FindFirstChild("Heartbeat") 
+	if heartbeatGui then 
+		local heartbeat = heartbeatGui:FindFirstChild("Heartbeat") 
+		if heartbeat and heartbeat.Parent.Enabled then 
+			return true, heartbeat 
+		end 
+	end 
+	return false, nil 
+end 
+
+-- NEW SYSTEM: Position-based clicking at fixed coordinates 
+local trackedBeats = {} 
+local clickedBeats = {} 
+local clickCount = 0 
+local beatConnection = nil 
+local CLICK_X = 570 
+local CLICK_Y = 746 
+local lastClickTime = 0 
+
+local function monitorBeatsAndClick() 
+	local isActive, heartbeatContainer = isHeartbeatActive() 
+	
+	if not isActive then 
+		if puzzleStartTime then 
+			puzzleStartTime = nil 
+			trackedBeats = {} 
+			clickedBeats = {} 
+			clickCount = 0 
+			beatIdCounter = 0 
+			lastClickTime = 0 
+			if beatConnection then 
+				beatConnection:Disconnect() 
+				beatConnection = nil 
+			end 
+			disableBlackout() 
+			print("❤️ Heartbeat puzzle ended - clicked " .. clickCount .. " beats") 
+			
+			-- Resume auto-farm after heartbeat completes 
+			if autoFarmEnabled then 
+				print("⚡ Heartbeat done! Checking computer status...") 
+				task.wait(1) -- Wait for puzzle GUI to close 
+			end 
+		end 
+		return 
+	end 
+	
+	-- First time seeing the puzzle 
+	if not puzzleStartTime then 
+		puzzleStartTime = tick() 
+		trackedBeats = {} 
+		clickedBeats = {} 
+		clickCount = 0 
+		lastClickTime = 0 
+		enableBlackout() 
+		print(string.format("❤️ Heartbeat puzzle detected! Will click at X=%d, Y=%d", CLICK_X, CLICK_Y)) 
+		
+		-- Lock cursor to click position 
+		moveCursorToPosition(CLICK_X, CLICK_Y) 
+		
+		-- Find the Playfield where Beats actually spawn 
+		local playfield = heartbeatContainer:FindFirstChild("Playfield") 
+		if playfield then 
+			-- Set up ChildAdded listener to track beats 
+			beatConnection = playfield.ChildAdded:Connect(function(child) 
+				if autoHeartbeatEnabled and child.Name == "Beat" then 
+					beatIdCounter = beatIdCounter + 1 
+					local uniqueId = "beat_" .. beatIdCounter 
+					
+					trackedBeats[uniqueId] = { 
+						element = child, 
+						spawnTime = tick(), 
+						id = uniqueId 
+					} 
+					print(string.format("🎵 Beat #%d spawned, tracking...", beatIdCounter)) 
+				end 
+			end) 
+		end 
+		
+		return 
+	end 
+	
+	-- Keep cursor locked at click position 
+	moveCursorToPosition(CLICK_X, CLICK_Y) 
+	
+	-- Check all tracked beats 
+	for beatId, beatData in pairs(trackedBeats) do 
+		if not clickedBeats[beatId] and beatData.element and beatData.element.Parent then 
+			local beat = beatData.element 
+			
+			-- Get beat's current position 
+			local beatX = beat.AbsolutePosition.X 
+			local beatY = beat.AbsolutePosition.Y 
+			local beatWidth = beat.AbsoluteSize.X 
+			local beatHeight = beat.AbsoluteSize.Y 
+			local beatCenterX = beatX + (beatWidth / 2) 
+			local beatCenterY = beatY + (beatHeight / 2) 
+			
+			-- Calculate distance from beat center to click position 
+			local distanceX = math.abs(beatCenterX - CLICK_X) 
+			local distanceY = math.abs(beatCenterY - CLICK_Y) 
+			local totalDistance = math.sqrt(distanceX^2 + distanceY^2) 
+			
+			-- Debug: Show position when beat is somewhat close 
+			if totalDistance <= 100 then 
+				print(string.format("📍 %s: Center=(%.1f, %.1f) Target=(%d, %d) Dist=%.1f", 
+					beatId, beatCenterX, beatCenterY, CLICK_X, CLICK_Y, totalDistance)) 
+			end 
+			
+			-- Click when beat center is within 30 pixels of the target position 
+			if totalDistance <= 30 then 
+				-- Prevent rapid double-clicks 
+				local currentTime = tick() 
+				if currentTime - lastClickTime > 0.15 then 
+					print(string.format("✅ CLICKING %s! Distance: %.1f pixels", beatId, totalDistance)) 
+					simulateClick() 
+					clickedBeats[beatId] = true 
+					clickCount = clickCount + 1 
+					lastClickTime = currentTime 
+					task.wait(0.08) 
+				end 
+			end 
+		end 
+	end 
+end 
+
+
+
+-- Check if computer has Prompts folder and return label 
+local function getComputerLabel(computerModel) 
+	local promptsFolder = computerModel:FindFirstChild("Prompts") 
+	if promptsFolder then 
+		return "COMPUTER" 
+	else 
+		return "Done" 
+	end 
+end 
+
+-- Create ESP highlight for object 
+local function createESPHighlight(obj, isComputer) 
+	if not obj:IsA("Model") and not obj:IsA("BasePart") then return end 
+	
+	local existingHighlight = obj:FindFirstChild("ESPHighlight") 
+	if existingHighlight then 
+		existingHighlight:Destroy() 
+	end 
+	
+	local highlight = Instance.new("Highlight") 
+	highlight.Name = "ESPHighlight" 
+	highlight.Adornee = obj 
+	highlight.OutlineColor = isComputer and COMPUTER_COLOR or PLAYER_BASE 
+	highlight.OutlineTransparency = 0 
+	highlight.FillTransparency = 1 
+	highlight.Parent = obj 
+	
+	local screenGui = playerGui:FindFirstChild("ESPGui") 
+	if not screenGui then 
+		screenGui = Instance.new("ScreenGui") 
+		screenGui.Name = "ESPGui" 
+		screenGui.ResetOnSpawn = false 
+		screenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling 
+		screenGui.DisplayOrder = 50 
+		screenGui.Parent = playerGui 
+	end 
+	
+	local textLabel = Instance.new("TextLabel") 
+	textLabel.Name = "ESPNameLabel_" .. obj.Name 
+	textLabel.BackgroundTransparency = 1 
+	textLabel.Text = isComputer and getComputerLabel(obj) or obj.Name 
+	textLabel.TextColor3 = isComputer and COMPUTER_COLOR or PLAYER_BASE 
+	textLabel.TextSize = 16 
+	textLabel.Font = Enum.Font.Arcade 
+	textLabel.TextStrokeTransparency = 0.2 
+	textLabel.TextScaled = false 
+	textLabel.Parent = screenGui 
+	
+	espObjects[obj] = { 
+		highlight = highlight, 
+		label = textLabel, 
+		isComputer = isComputer, 
+		phase = isComputer and 0 or math.random() 
+	} 
+	
+	textLabel.Size = UDim2.new(0, 100, 0, 25) 
+end 
+
+local glowProgress = 0 
+local function updateESPColors() 
+	glowProgress = (glowProgress + 0.02) % 1 
+	
+	for obj, data in pairs(espObjects) do 
+		if obj.Parent == nil then 
+			if data.label then 
+				data.label:Destroy() 
+			end 
+			espObjects[obj] = nil 
+		else 
+			if data.isComputer then 
+				data.highlight.OutlineColor = COMPUTER_COLOR 
+				data.label.TextColor3 = COMPUTER_COLOR 
+			else 
+				local snakeProgress = (glowProgress + data.phase) % 1 
+				local snakeColor = getSnakeColor(PLAYER_BASE, PLAYER_GLOW, snakeProgress) 
+				data.highlight.OutlineColor = snakeColor 
+				data.label.TextColor3 = snakeColor 
+			end 
+		end 
+	end 
+end 
+
+local function scanForESPObjects() 
+	if not espEnabled then return end 
+	
+	for _, obj in ipairs(workspace:GetDescendants()) do 
+		if obj:IsA("Model") and obj.Name == "Computer" then 
+			if not espObjects[obj] then 
+				createESPHighlight(obj, true) 
+			end 
+		end 
+	end 
+	
+	for _, plr in ipairs(Players:GetPlayers()) do 
+		if plr ~= player and plr.Character then 
+			local character = plr.Character 
+			if not espObjects[character] then 
+				createESPHighlight(character, false) 
+			end 
+		end 
+	end 
+end 
+
+task.spawn(function() 
+	while true do 
+		task.wait() 
+		if not espEnabled then continue end 
+		
+		updateESPColors() 
+		
+		local camera = workspace.CurrentCamera 
+		if not camera then continue end 
+		
+		for obj, data in pairs(espObjects) do 
+			if obj.Parent and data.label then 
+				local labelGui = data.label 
+				
+				local objPos 
+				if obj:IsA("Model") then 
+					local primaryPart = obj.PrimaryPart or obj:FindFirstChildWhichIsA("BasePart") 
+					if primaryPart then 
+						objPos = primaryPart.Position + Vector3.new(0, primaryPart.Size.Y / 2 + 3, 0) 
+					end 
+				else 
+					objPos = obj.Position + Vector3.new(0, obj.Size.Y / 2 + 3, 0) 
+				end 
+				
+				if objPos then 
+					local screenPos, onScreen = camera:WorldToViewportPoint(objPos) 
+					labelGui.Position = UDim2.new(0, screenPos.X, 0, screenPos.Y) 
+					labelGui.AnchorPoint = Vector2.new(0.5, 0.5) 
+					labelGui.Visible = onScreen 
+				end 
+			end 
+		end 
+	end 
+end) 
+
+task.spawn(function() 
+	while true do 
+		task.wait(2) 
+		if espEnabled then 
+			scanForESPObjects() 
+		end 
+	end 
+end) 
+
+Players.PlayerAdded:Connect(function(newPlayer) 
+	newPlayer.CharacterAdded:Connect(function(character) 
+		task.wait(0.1) 
+		if espEnabled then 
+			createESPHighlight(character, false) 
+		end 
+	end) 
+end) 
+
+workspace.DescendantAdded:Connect(function(obj) 
+	if espEnabled and obj:IsA("Model") and obj.Name == "Computer" then 
+		task.wait(0.1) 
+		createESPHighlight(obj, true) 
+	end 
+end) 
+
+local function createMenu() 
+	print("Creating menu...") 
+	
+	local screenGui = Instance.new("ScreenGui") 
+	screenGui.Name = "SafetyMenu" 
+	screenGui.ResetOnSpawn = false 
+	screenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling 
+	screenGui.DisplayOrder = 100 
+	
+	local frame = Instance.new("Frame") 
+	frame.Name = "MainFrame" 
+	frame.Size = UDim2.new(0, 380, 0, 500) 
+	frame.Position = UDim2.new(0.5, -190, 0.02, 0) 
+	frame.BackgroundColor3 = Color3.fromRGB(20, 20, 20) 
+	frame.BorderSizePixel = 0 
+	frame.Active = true 
+	frame.Draggable = true 
+	frame.Parent = screenGui 
+	
+	local corner = Instance.new("UICorner") 
+	corner.CornerRadius = UDim.new(0, 12) 
+	corner.Parent = frame 
+	
+	local accentBar = Instance.new("Frame") 
+	accentBar.Name = "AccentBar" 
+	accentBar.Size = UDim2.new(1, 0, 0, 4) 
+	accentBar.Position = UDim2.new(0, 0, 0, 0) 
+	accentBar.BackgroundColor3 = Color3.fromRGB(229, 9, 20) 
+	accentBar.BorderSizePixel = 0 
+	accentBar.Parent = frame 
+	
+	local accentCorner = Instance.new("UICorner") 
+	accentCorner.CornerRadius = UDim.new(0, 12) 
+	accentCorner.Parent = accentBar 
+	
+	local title = Instance.new("TextLabel") 
+	title.Name = "Title" 
+	title.Size = UDim2.new(1, 0, 0, 45) 
+	title.Position = UDim2.new(0, 0, 0, 4) 
+	title.BackgroundColor3 = Color3.fromRGB(20, 20, 20) 
+	title.BorderSizePixel = 0 
+	title.Text = "SAFETY CONTROLS" 
+	title.TextColor3 = Color3.fromRGB(229, 9, 20) 
+	title.TextSize = 20 
+	title.Font = Enum.Font.GothamBold 
+	title.Parent = frame 
+	
+	local titleCorner = Instance.new("UICorner") 
+	titleCorner.CornerRadius = UDim.new(0, 12) 
+	titleCorner.Parent = title 
+	
+	local keysLabel = Instance.new("TextLabel") 
+	keysLabel.Name = "KeysLabel" 
+	keysLabel.Size = UDim2.new(1, -30, 0, 230) 
+	keysLabel.Position = UDim2.new(0, 15, 0, 55) 
+	keysLabel.BackgroundTransparency = 1 
+	keysLabel.Text = "H - Teleport to Random Computer\nJ - Toggle Health Safety (Fly Up)\nL - Toggle ESP\nT - Toggle Manual Flight\nK - Toggle Animatronic Detection\nP - Toggle Heartbeat Auto\nV - Toggle Raycast Visualization\n\nStatus:\nHealth Safety: ENABLED\nNoclip: ENABLED\nESP: ENABLED\nAnim Detection: ENABLED\nHeartbeat Auto: ENABLED\nRaycast Debug: ENABLED" 
+	keysLabel.TextColor3 = Color3.fromRGB(220, 220, 220) 
+	keysLabel.TextSize = 12 
+	keysLabel.Font = Enum.Font.Gotham 
+	keysLabel.TextXAlignment = Enum.TextXAlignment.Left 
+	keysLabel.TextYAlignment = Enum.TextYAlignment.Top 
+	keysLabel.Parent = frame 
+	
+	local warpPlayerButton = Instance.new("TextButton") 
+	warpPlayerButton.Name = "WarpPlayerButton" 
+	warpPlayerButton.Size = UDim2.new(1, -30, 0, 45) 
+	warpPlayerButton.Position = UDim2.new(0, 15, 1, -60) 
+	warpPlayerButton.BackgroundColor3 = Color3.fromRGB(229, 9, 20) 
+	warpPlayerButton.BorderSizePixel = 0 
+	warpPlayerButton.Text = "👤 WARP TO PLAYER" 
+	warpPlayerButton.TextColor3 = Color3.fromRGB(255, 255, 255) 
+	warpPlayerButton.TextSize = 18 
+	warpPlayerButton.Font = Enum.Font.GothamBold 
+	warpPlayerButton.Parent = frame 
+	
+	local warpButtonCorner = Instance.new("UICorner") 
+	warpButtonCorner.CornerRadius = UDim.new(0, 8) 
+	warpButtonCorner.Parent = warpPlayerButton 
+	
+	warpPlayerButton.MouseEnter:Connect(function() 
+		warpPlayerButton.BackgroundColor3 = Color3.fromRGB(200, 7, 17) 
+	end) 
+	
+	warpPlayerButton.MouseLeave:Connect(function() 
+		warpPlayerButton.BackgroundColor3 = Color3.fromRGB(229, 9, 20) 
+	end) 
+	
+	local compHideButton = Instance.new("TextButton") 
+	compHideButton.Name = "CompHideButton" 
+	compHideButton.Size = UDim2.new(1, -30, 0, 45) 
+	compHideButton.Position = UDim2.new(0, 15, 1, -225) 
+	compHideButton.BackgroundColor3 = Color3.fromRGB(229, 9, 20) 
+	compHideButton.BorderSizePixel = 0 
+	compHideButton.Text = "🔽 COMP HIDE: OFF" 
+	compHideButton.TextColor3 = Color3.fromRGB(255, 255, 255) 
+	compHideButton.TextSize = 18 
+	compHideButton.Font = Enum.Font.GothamBold 
+	compHideButton.Parent = frame 
+	
+	local compHideCorner = Instance.new("UICorner") 
+	compHideCorner.CornerRadius = UDim.new(0, 8) 
+	compHideCorner.Parent = compHideButton 
+	
+	compHideButton.MouseEnter:Connect(function() 
+		compHideButton.BackgroundColor3 = Color3.fromRGB(200, 7, 17) 
+	end) 
+	
+	compHideButton.MouseLeave:Connect(function() 
+		compHideButton.BackgroundColor3 = Color3.fromRGB(229, 9, 20) 
+	end) 
+	
+	local stopEButton = Instance.new("TextButton") 
+	stopEButton.Name = "StopEButton" 
+	stopEButton.Size = UDim2.new(1, -30, 0, 45) 
+	stopEButton.Position = UDim2.new(0, 15, 1, -170) 
+	stopEButton.BackgroundColor3 = Color3.fromRGB(229, 9, 20) 
+	stopEButton.BorderSizePixel = 0 
+	stopEButton.Text = "🛑 STOP E PRESSING" 
+	stopEButton.TextColor3 = Color3.fromRGB(255, 255, 255) 
+	stopEButton.TextSize = 18 
+	stopEButton.Font = Enum.Font.GothamBold 
+	stopEButton.Parent = frame 
+	
+	local stopECorner = Instance.new("UICorner") 
+	stopECorner.CornerRadius = UDim.new(0, 8) 
+	stopECorner.Parent = stopEButton 
+	
+	stopEButton.MouseEnter:Connect(function() 
+		stopEButton.BackgroundColor3 = Color3.fromRGB(200, 7, 17) 
+	end) 
+	
+	stopEButton.MouseLeave:Connect(function() 
+		stopEButton.BackgroundColor3 = Color3.fromRGB(229, 9, 20) 
+	end) 
+	
+	local hideButton = Instance.new("TextButton") 
+	hideButton.Name = "HideButton" 
+	hideButton.Size = UDim2.new(1, -30, 0, 45) 
+	hideButton.Position = UDim2.new(0, 15, 1, -115) 
+	hideButton.BackgroundColor3 = Color3.fromRGB(229, 9, 20) 
+	hideButton.BorderSizePixel = 0 
+	hideButton.Text = "🚀 HIDE IN SKY" 
+	hideButton.TextColor3 = Color3.fromRGB(255, 255, 255) 
+	hideButton.TextSize = 18 
+	hideButton.Font = Enum.Font.GothamBold 
+	hideButton.Parent = frame 
+	
+	local buttonCorner = Instance.new("UICorner") 
+	buttonCorner.CornerRadius = UDim.new(0, 8) 
+	buttonCorner.Parent = hideButton 
+	
+	hideButton.MouseEnter:Connect(function() 
+		hideButton.BackgroundColor3 = Color3.fromRGB(200, 7, 17) 
+	end) 
+	
+	hideButton.MouseLeave:Connect(function() 
+		hideButton.BackgroundColor3 = Color3.fromRGB(229, 9, 20) 
+	end) 
+	
+	local shadow = Instance.new("ImageLabel") 
+	shadow.Name = "Shadow" 
+	shadow.Size = UDim2.new(1, 20, 1, 20) 
+	shadow.Position = UDim2.new(0, -10, 0, -10) 
+	shadow.BackgroundTransparency = 1 
+	shadow.Image = "rbxasset://textures/ui/Scroll/scroll-middle.png" 
+	shadow.ImageColor3 = Color3.fromRGB(0, 0, 0) 
+	shadow.ImageTransparency = 0.7 
+	shadow.ScaleType = Enum.ScaleType.Slice 
+	shadow.SliceCenter = Rect.new(12, 12, 12, 12) 
+	shadow.ZIndex = -1 
+	shadow.Parent = frame 
+	
+	screenGui.Parent = playerGui 
+	
+	print("Menu created successfully!") 
+	
+	return keysLabel, hideButton, warpPlayerButton, compHideButton, stopEButton 
+end 
+
+local statusLabel, hideButton, warpPlayerButton, compHideButton, stopEButton = createMenu() 
+
+local function updateStatus() 
+	local healthStatus = healthSafetyEnabled and "ENABLED" or "DISABLED" 
+	local healthColor = healthSafetyEnabled and "🟢" or "🔴" 
+	local espStatus = espEnabled and "ENABLED" or "DISABLED" 
+	local espColor = espEnabled and "🟢" or "🔴" 
+	local animStatus = animatronicDetectionEnabled and "ENABLED" or "DISABLED" 
+	local animColor = animatronicDetectionEnabled and "🟢" or "🔴" 
+	local heartbeatStatus = autoHeartbeatEnabled and "ENABLED" or "DISABLED" 
+	local heartbeatColor = autoHeartbeatEnabled and "🟢" or "🔴" 
+	local raycastStatus = visualizeRaycasts and "ENABLED" or "DISABLED"
+	local raycastColor = visualizeRaycasts and "🟢" or "🔴"
+	
+	statusLabel.Text = string.format( 
+		"H - Teleport to Random Computer\nJ - Toggle Health Safety (Fly Up)\nL - Toggle ESP\nT - Toggle Manual Flight\nK - Toggle Animatronic Detection\nP - Toggle Heartbeat Auto\nV - Toggle Raycast Visualization\n\nStatus:\nHealth Safety: %s %s\nNoclip: 🟢 ENABLED\nESP: %s %s\nAnim Detection: %s %s\nHeartbeat Auto: %s %s\nRaycast Debug: %s %s", 
+		healthColor, 
+		healthStatus, 
+		espColor, 
+		espStatus, 
+		animColor, 
+		animStatus, 
+		heartbeatColor, 
+		heartbeatStatus,
+		raycastColor,
+		raycastStatus 
+	) 
+end 
+
+local function enableNoclip() 
+	Clip = false 
+	local function NoclipLoop() 
+		if Clip == false and player.Character ~= nil then 
+			for _, child in pairs(player.Character:GetDescendants()) do 
+				if child:IsA("BasePart") and child.CanCollide == true and child.Name ~= floatName then 
+					child.CanCollide = false 
+				end 
+			end 
+		end 
+	end 
+	if Noclipping then 
+		Noclipping:Disconnect() 
+	end 
+	Noclipping = RunService.Stepped:Connect(NoclipLoop) 
+end 
+
+local function disableNoclip() 
+	if Noclipping then 
+		Noclipping:Disconnect() 
+	end 
+	Clip = true 
+end 
+
+enableNoclip() 
+
+local function removeBaseplateTouch() 
+	local baseplate = workspace:FindFirstChild("Baseplate") 
+	if baseplate then 
+		local touchInterest = baseplate:FindFirstChild("TouchInterest") 
+		if touchInterest then 
+			touchInterest:Destroy() 
+			print("✅ Removed TouchInterest from Baseplate") 
+		else 
+			print("ℹ️ Baseplate found but no TouchInterest to remove") 
+		end 
+	else 
+		print("ℹ️ No Baseplate found in workspace") 
+	end 
+end 
+
+-- Remove baseplate touch on startup 
+removeBaseplateTouch() 
+
+local function updateComputers() 
+	computers = {} 
+	for _, obj in ipairs(workspace:GetDescendants()) do 
+		if obj:IsA("Model") and obj.Name == "Computer" then 
+			local part = obj.PrimaryPart or obj:FindFirstChildWhichIsA("BasePart") 
+			if part then 
+				table.insert(computers, obj) 
+			end 
+		end 
+	end 
+	print("Found " .. #computers .. " computers") 
+end 
+
+updateComputers() 
+
+workspace.DescendantAdded:Connect(function(obj) 
+	if obj:IsA("Model") and obj.Name == "Computer" then 
+		updateComputers() 
+	end 
+end) 
+
+workspace.DescendantRemoving:Connect(function(obj) 
+	if obj:IsA("Model") and obj.Name == "Computer" then 
+		updateComputers() 
+	end 
+end) 
+
+local function hasPrompts(computerModel) 
+	local promptsFolder = computerModel:FindFirstChild("Prompts") 
+	return promptsFolder ~= nil 
+end 
+
+local function findTargetMesh(computerModel) 
+	-- Find the Prompts folder which contains positions 1, 2, 3
+	local promptsFolder = computerModel:FindFirstChild("Prompts")
+	if not promptsFolder then
+		warn("No Prompts folder found in computer!")
+		return nil
+	end
+	
+	-- Get the last attempted position for this computer (if any)
+	local lastAttempted = lastAttemptedPosition[computerModel]
+	if lastAttempted then
+		print(string.format("⚠️ Excluding last attempted position: %s", lastAttempted))
+	end
+	
+	-- Map position numbers to mesh paths and names (CORRECTED)
+	local positionData = {
+		["3"] = {path = "Meshes/t_Cube.029", name = "Right (Keyboard)", priority = 3, label = "RIGHT_KEYBOARD"},
+		["2"] = {path = "Meshes/t_Cube.019", name = "Middle", priority = 2, label = "MIDDLE"},
+		["1"] = {path = "Meshes/t_Cube.021", name = "Left", priority = 1, label = "LEFT"}
+	}
+	
+	-- Function to get actual BasePart from position (could be Model, Folder, or Part)
+	local function getPositionPart(positionObj)
+		if positionObj:IsA("BasePart") then
+			return positionObj
+		elseif positionObj:IsA("Model") then
+			return positionObj.PrimaryPart or positionObj:FindFirstChildWhichIsA("BasePart")
+		else
+			-- It's a Folder or something else, find first BasePart
+			return positionObj:FindFirstChildWhichIsA("BasePart", true)
+		end
+	end
+	
+	-- First pass: Find all meshes and their positions
+	local meshPositions = {}
+	print("🔍 Locating all mesh positions:")
+	for positionNum, data in pairs(positionData) do
+		for _, descendant in ipairs(computerModel:GetDescendants()) do 
+			local fullPath = descendant:GetFullName() 
+			if fullPath:find(data.path) then
+				local meshPos
+				if descendant:IsA("BasePart") then
+					meshPos = descendant.Position
+				elseif descendant.Parent and descendant.Parent:IsA("BasePart") then
+					meshPos = descendant.Parent.Position
+				end
+				
+				if meshPos then
+					print(string.format("  [%s] %s → Position: (%.1f, %.1f, %.1f)", 
+						data.label, data.name, meshPos.X, meshPos.Y, meshPos.Z))
+					
+					meshPositions[positionNum] = {
+						mesh = descendant,
+						position = meshPos,
+						name = data.name,
+						priority = data.priority
+					}
+					break
+				end
+			end 
+		end
+	end
+	
+	-- Function to check if a position is occupied
+	local function isPositionOccupied(positionNumber)
+		local position = promptsFolder:FindFirstChild(tostring(positionNumber))
+		if not position then
+			return true, "No position found"
+		end
+		
+		local proximityPrompt = position:FindFirstChild("ProximityPrompt")
+		if not proximityPrompt then
+			return true, "No ProximityPrompt"
+		end
+		
+		-- Check 1: If ProximityPrompt is disabled, someone is actively using it
+		if not proximityPrompt.Enabled then
+			return true, "In use (Prompt disabled)"
+		end
+		
+		-- Check 2: Get mesh position for proximity check
+		local checkPosition = nil
+		local positionPart = getPositionPart(position)
+		
+		if positionPart then
+			checkPosition = positionPart.Position
+			print(string.format("  Using position part: %s", tostring(checkPosition)))
+		elseif meshPositions[positionNumber] then
+			checkPosition = meshPositions[positionNumber].position
+			print(string.format("  Using mesh position (fallback): %s", tostring(checkPosition)))
+		else
+			print(string.format("  WARNING: No position found for %s", positionNumber))
+			return false, "Available (no position to check)"
+		end
+		
+		-- Check 3: ANIMATION CHECK - Best way to detect terminal usage!
+		for _, otherPlayer in ipairs(Players:GetPlayers()) do
+			-- Exclude ourselves (both by reference AND by name for safety)
+			if otherPlayer ~= player and otherPlayer.Name ~= player.Name and otherPlayer.Character then
+				local otherHRP = otherPlayer.Character:FindFirstChild("HumanoidRootPart")
+				if not otherHRP then continue end
+				
+				local distance = (otherHRP.Position - checkPosition).Magnitude
+				
+				-- VERY TIGHT: Only 2 studs! Positions are 1.5 studs apart
+				-- This ensures we only detect someone at THIS EXACT position
+				if distance < 2 then
+					-- Check if they're playing a "hacking" or "typing" animation
+					local humanoid = otherPlayer.Character:FindFirstChild("Humanoid")
+					if humanoid then
+						local animator = humanoid:FindFirstChild("Animator")
+						if animator then
+							local playingTracks = animator:GetPlayingAnimationTracks()
+							
+							for _, track in ipairs(playingTracks) do
+								if track.Animation then
+									local animName = track.Animation.Name
+									local animId = tostring(track.Animation.AnimationId)
+									
+									-- Check for specific animation ID: rbxassetid://91255538372366
+									if animId:find("91255538372366") then
+										print(string.format("  🎬 Player %s playing HACKING animation! (ID: %s, distance: %.1f)", 
+											otherPlayer.Name, animId, distance))
+										return true, otherPlayer.Name.." (hacking animation, dist: "..math.floor(distance)..")"
+									end
+									
+									-- Check animation name for "hacking" (case-insensitive)
+									local animNameLower = animName:lower()
+									if animNameLower == "hacking" or animNameLower:find("hack") or 
+									   animNameLower:find("type") or animNameLower:find("use") or
+									   animNameLower:find("computer") or animNameLower:find("terminal") then
+										
+										print(string.format("  🎬 Player %s playing animation: '%s' (distance: %.1f)", 
+											otherPlayer.Name, animName, distance))
+										
+										return true, otherPlayer.Name.." (using terminal, anim: "..animName..")"
+									end
+								end
+							end
+						end
+					end
+					
+					-- Fallback: Check velocity if no animation detected
+					local velocity = otherHRP.AssemblyLinearVelocity
+					local speed = velocity.Magnitude
+					
+					if distance < 2.5 and speed < 3 then
+						print(string.format("  Player %s: distance %.1f, speed %.1f (stationary)", otherPlayer.Name, distance, speed))
+						return true, otherPlayer.Name.." (stationary near position, dist: "..math.floor(distance)..")"
+					end
+				end
+			end
+		end
+		
+		return false, "Available"
+	end
+	
+	-- Find all available meshes and check occupancy
+	local availableMeshes = {}
+	
+	for positionNum, data in pairs(positionData) do
+		print(string.format("Checking Position %s (%s):", positionNum, data.name))
+		
+		-- Check if position is occupied
+		local occupied, reason = isPositionOccupied(positionNum)
+		
+		if meshPositions[positionNum] then
+			table.insert(availableMeshes, {
+				mesh = meshPositions[positionNum].mesh,
+				name = data.name,
+				priority = data.priority,
+				positionNum = positionNum,
+				occupied = occupied,
+				reason = reason,
+				label = data.label
+			})
+		end
+	end
+	
+	-- Sort by priority (3 = right/keyboard, 2 = middle, 1 = left)
+	table.sort(availableMeshes, function(a, b) return a.priority > b.priority end)
+	
+	-- Try to find an unoccupied mesh
+	print("📋 Evaluating all positions in priority order:")
+	for _, meshData in ipairs(availableMeshes) do
+		print(string.format("  → Checking %s [%s] (Priority %d)", 
+			meshData.name, meshData.label or "NO_LABEL", meshData.priority))
+		
+		-- Skip if this was the last position we tried at this computer AND we actually reached it
+		if lastAttempted and meshData.positionNum == lastAttempted then
+			print(string.format("    ⏭️ SKIPPED - Last attempted position"))
+			-- But still check the others!
+			continue
+		end
+		
+		if not meshData.occupied then
+			print(string.format("    ✅ SELECTED! Flying to %s [%s]", meshData.name, meshData.label or "NO_LABEL"))
+			print(string.format("    Mesh object: %s", tostring(meshData.mesh)))
+			-- Track this as the last attempted position for this computer
+			lastAttemptedPosition[computerModel] = meshData.positionNum
+			return meshData.mesh
+		else
+			print(string.format("    ❌ OCCUPIED - Reason: %s", meshData.reason))
+		end
+	end
+	
+	-- All positions occupied at this computer
+	print("⚠️ All 3 positions at this computer are occupied!")
+	-- Clear the last attempted position since we're giving up on this computer
+	lastAttemptedPosition[computerModel] = nil
+	return nil
+end 
+
+local function pressE() 
+	VirtualInputManager:SendKeyEvent(true, Enum.KeyCode.E, false, game) 
+	task.wait(0.05) 
+	VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.E, false, game) 
+end 
+
+local function flyTo(targetPos, callback) 
+	if isFlying then return end 
+	isFlying = true 
+	
+	local character = player.Character or player.CharacterAdded:Wait() 
+	local hrp = character:WaitForChild("HumanoidRootPart") 
+	local hum = character:WaitForChild("Humanoid")
+	local startPos = hrp.Position 
+	
+	-- Enable PlatformStand for smooth flight
+	hum.PlatformStand = true
+	
+	-- Create BodyGyro for stable orientation
+	local bg = Instance.new("BodyGyro")
+	bg.Name = "AutoFlyBodyGyro"
+	bg.MaxTorque = Vector3.new(9e9, 9e9, 9e9)
+	bg.P = 9e4
+	bg.Parent = hrp
+	
+	-- Create BodyVelocity for movement
+	local bv = Instance.new("BodyVelocity")
+	bv.Name = "AutoFlyBodyVelocity"
+	bv.MaxForce = Vector3.new(9e9, 9e9, 9e9)
+	bv.Parent = hrp
+	
+	-- Phase 1: Rise up to sky (50 studs up)
+	local skyPos = startPos + Vector3.new(0, 50, 0)
+	local riseTime = 1.0
+	local riseStartTime = tick()
+	
+	print("🔼 Rising to sky...")
+	
+	local riseConnection
+	riseConnection = RunService.RenderStepped:Connect(function()
+		if not character.Parent then
+			riseConnection:Disconnect()
+			if bv then bv:Destroy() end
+			if bg then bg:Destroy() end
+			if hum then hum.PlatformStand = false end
+			isFlying = false
+			return
+		end
+		
+		local elapsed = tick() - riseStartTime
+		local alpha = math.min(elapsed / riseTime, 1)
+		
+		-- Calculate velocity to reach target
+		local currentPos = hrp.Position
+		local targetVelocity = (skyPos - currentPos).Unit * 50
+		bv.Velocity = targetVelocity
+		bg.CFrame = CFrame.new(currentPos, skyPos)
+		
+		if alpha >= 1 or (hrp.Position - skyPos).Magnitude < 2 then
+			riseConnection:Disconnect()
+			
+			-- Phase 2: Travel in sky to target location
+			local skyTarget = Vector3.new(targetPos.X, skyPos.Y, targetPos.Z)
+			local distance = (skyTarget - hrp.Position).Magnitude
+			local travelTime = distance / flySpeed
+			local travelStartTime = tick()
+			
+			print("✈️ Flying in sky...")
+			
+			local travelConnection
+			travelConnection = RunService.RenderStepped:Connect(function()
+				if not character.Parent then
+					travelConnection:Disconnect()
+					if bv then bv:Destroy() end
+					if bg then bg:Destroy() end
+					if hum then hum.PlatformStand = false end
+					isFlying = false
+					return
+				end
+				
+				local travelElapsed = tick() - travelStartTime
+				local travelAlpha = math.min(travelElapsed / travelTime, 1)
+				
+				local currentPos = hrp.Position
+				local direction = (skyTarget - currentPos).Unit
+				bv.Velocity = direction * flySpeed
+				bg.CFrame = CFrame.new(currentPos, skyTarget)
+				
+				if travelAlpha >= 1 or (hrp.Position - skyTarget).Magnitude < 3 then
+					travelConnection:Disconnect()
+					
+					-- Phase 3: Descend down to computer
+					local descendTime = 1.5
+					local descendStartTime = tick()
+					
+					print("🔽 Descending...")
+					
+					local descendConnection
+					descendConnection = RunService.RenderStepped:Connect(function()
+						if not character.Parent then
+							descendConnection:Disconnect()
+							if bv then bv:Destroy() end
+							if bg then bg:Destroy() end
+							if hum then hum.PlatformStand = false end
+							isFlying = false
+							return
+						end
+						
+						local descendElapsed = tick() - descendStartTime
+						local descendAlpha = math.min(descendElapsed / descendTime, 1)
+						
+						local currentPos = hrp.Position
+						local direction = (targetPos - currentPos).Unit
+						bv.Velocity = direction * 30
+						bg.CFrame = CFrame.new(currentPos, targetPos)
+						
+						-- Check if we're close enough OR time is up
+						local distanceToTarget = (hrp.Position - targetPos).Magnitude
+						if distanceToTarget < 2 or descendAlpha >= 1 then
+							descendConnection:Disconnect()
+							
+							-- Clean up BodyMovers and disable PlatformStand
+							if bv then bv:Destroy() end
+							if bg then bg:Destroy() end
+							if hum then hum.PlatformStand = false end
+							
+							-- Lock to final position
+							hrp.CFrame = CFrame.new(targetPos)
+							hrp.AssemblyLinearVelocity = Vector3.zero
+							
+							isFlying = false
+							print("✅ Arrived!")
+							if callback then callback() end
+						end
+					end)
+				end
+			end)
+		end
+	end)
+end 
+
+local function stopFlying() 
+	if stayConnection then 
+		stayConnection:Disconnect() 
+		stayConnection = nil 
+	end 
+	isFlying = false 
+end 
+
+local function flyUpAndStay(height) 
+	height = height or 50 
+	
+	local character = player.Character 
+	if not character then return end 
+	
+	local hrp = character:FindFirstChild("HumanoidRootPart") 
+	if not hrp then return end 
+	
+	local targetPos = hrp.Position + Vector3.new(0, height, 0) 
+	
+	if isFlying then return end 
+	isFlying = true 
+	
+	local startPos = hrp.Position 
+	local distance = height 
+	local travelTime = distance / flySpeed 
+	local startTime = tick() 
+	
+	if stayConnection then 
+		stayConnection:Disconnect() 
+	end 
+	
+	stayConnection = RunService.RenderStepped:Connect(function() 
+		if not character.Parent or not healthSafetyEnabled then 
+			stayConnection:Disconnect() 
+			stayConnection = nil 
+			isFlying = false 
+			return 
+		end 
+		
+		local elapsed = tick() - startTime 
+		local alpha = math.min(elapsed / travelTime, 1) 
+		
+		if alpha < 1 then 
+			hrp.CFrame = CFrame.new(startPos:Lerp(targetPos, alpha)) 
+		else 
+			hrp.CFrame = CFrame.new(targetPos) 
+			hrp.AssemblyLinearVelocity = Vector3.new(0, 0, 0) 
+		end 
+	end) 
+end 
+
+local function flyUpAndStayHidden(height) 
+	height = height or 100 
+	
+	local character = player.Character 
+	if not character then return end 
+	
+	local hrp = character:FindFirstChild("HumanoidRootPart") 
+	if not hrp then return end 
+	
+	local targetPos = hrp.Position + Vector3.new(0, height, 0) 
+	
+	local startPos = hrp.Position 
+	local distance = height 
+	local travelTime = distance / 25 
+	local startTime = tick() 
+	
+	if hideConnection then 
+		hideConnection:Disconnect() 
+	end 
+	
+	hideConnection = RunService.RenderStepped:Connect(function() 
+		if not character.Parent or not isHidden then 
+			if hideConnection then 
+				hideConnection:Disconnect() 
+				hideConnection = nil 
+			end 
+			return 
+		end 
+		
+		local elapsed = tick() - startTime 
+		local alpha = math.min(elapsed / travelTime, 1) 
+		
+		if alpha < 1 then 
+			local easedAlpha = 1 - math.pow(1 - alpha, 3) 
+			hrp.CFrame = CFrame.new(startPos:Lerp(targetPos, easedAlpha)) 
+		else 
+			hrp.CFrame = CFrame.new(targetPos) 
+			hrp.AssemblyLinearVelocity = Vector3.new(0, 0, 0) 
+		end 
+	end) 
+end 
+
+local function flyDownSlowly() 
+	local character = player.Character 
+	if not character then return end 
+	
+	local hrp = character:FindFirstChild("HumanoidRootPart") 
+	if not hrp then return end 
+	
+	if hideConnection then 
+		hideConnection:Disconnect() 
+		hideConnection = nil 
+	end 
+	
+	local startPos = hrp.Position 
+	local targetPos = Vector3.new(startPos.X, startPos.Y - 80, startPos.Z) 
+	
+	local distance = 80 
+	local travelTime = distance / (flySpeed * 0.8) 
+	local startTime = tick() 
+	
+	hideConnection = RunService.RenderStepped:Connect(function() 
+		if not character.Parent then 
+			if hideConnection then 
+				hideConnection:Disconnect() 
+				hideConnection = nil 
+			end 
+			return 
+		end 
+		
+		local elapsed = tick() - startTime 
+		local alpha = math.min(elapsed / travelTime, 1) 
+		
+		if alpha < 1 then 
+			local easedAlpha = alpha * alpha 
+			hrp.CFrame = CFrame.new(startPos:Lerp(targetPos, easedAlpha)) 
+		else 
+			if hideConnection then 
+				hideConnection:Disconnect() 
+				hideConnection = nil 
+			end 
+		end 
+	end) 
+end 
+
+local function toggleHide() 
+	isHidden = not isHidden 
+	
+	if isHidden then 
+		hideButton.Text = "⬇️ RETURN TO GROUND" 
+		hideButton.BackgroundColor3 = Color3.fromRGB(140, 140, 140) 
+		print("Warping to sky...") 
+		flyUpAndStayHidden(100) 
+	else 
+		hideButton.Text = "🚀 HIDE IN SKY" 
+		hideButton.BackgroundColor3 = Color3.fromRGB(229, 9, 20) 
+		print("Returning to ground...") 
+		flyDownSlowly() 
+	end 
+end 
+
+local function enableManualFly() 
+	local character = player.Character 
+	if not character then return end 
+	
+	local hrp = character:FindFirstChild("HumanoidRootPart") 
+	if not hrp then return end 
+	
+	local hum = character:FindFirstChild("Humanoid")
+	if not hum then return end
+	
+	isManualFlying = true 
+	
+	if manualFlyConnection then 
+		manualFlyConnection:Disconnect() 
+	end 
+	
+	-- Clean up old BodyMovers if they exist
+	local oldBV = hrp:FindFirstChild("FlyBodyVelocity")
+	local oldBG = hrp:FindFirstChild("FlyBodyGyro")
+	if oldBV then oldBV:Destroy() end
+	if oldBG then oldBG:Destroy() end
+	
+	-- Enable PlatformStand for smoother flight
+	hum.PlatformStand = true
+	
+	-- Create BodyGyro for camera-based rotation
+	local bg = Instance.new("BodyGyro")
+	bg.Name = "FlyBodyGyro"
+	bg.MaxTorque = Vector3.new(9e9, 9e9, 9e9)
+	bg.P = 9e4
+	bg.Parent = hrp
+	
+	-- Create BodyVelocity for movement
+	local bv = Instance.new("BodyVelocity")
+	bv.Name = "FlyBodyVelocity"
+	bv.MaxForce = Vector3.new(9e9, 9e9, 9e9)
+	bv.Parent = hrp
+	
+	manualFlyConnection = RunService.RenderStepped:Connect(function() 
+		if not character.Parent or not isManualFlying then 
+			if manualFlyConnection then 
+				manualFlyConnection:Disconnect() 
+				manualFlyConnection = nil 
+			end 
+			if bv then bv:Destroy() end
+			if bg then bg:Destroy() end
+			if hum then hum.PlatformStand = false end
+			return 
+		end 
+		
+		local camera = workspace.CurrentCamera 
+		local moveDirection = Vector3.zero
+		
+		if UserInputService:IsKeyDown(Enum.KeyCode.W) then 
+			moveDirection = moveDirection + camera.CFrame.LookVector
+		end 
+		if UserInputService:IsKeyDown(Enum.KeyCode.S) then 
+			moveDirection = moveDirection - camera.CFrame.LookVector
+		end 
+		if UserInputService:IsKeyDown(Enum.KeyCode.A) then 
+			moveDirection = moveDirection - camera.CFrame.RightVector
+		end 
+		if UserInputService:IsKeyDown(Enum.KeyCode.D) then 
+			moveDirection = moveDirection + camera.CFrame.RightVector
+		end 
+		if UserInputService:IsKeyDown(Enum.KeyCode.Space) then 
+			moveDirection = moveDirection + camera.CFrame.UpVector
+		end 
+		if UserInputService:IsKeyDown(Enum.KeyCode.LeftShift) then 
+			moveDirection = moveDirection - camera.CFrame.UpVector
+		end 
+		
+		if moveDirection.Magnitude > 0 then
+			moveDirection = moveDirection.Unit * flySpeed
+		end
+		
+		bv.Velocity = moveDirection
+		bg.CFrame = camera.CFrame
+	end) 
+	
+	print("Manual flying enabled! Use WASD + Space/Shift to fly") 
+end 
+
+local function disableManualFly() 
+	isManualFlying = false 
+	
+	if manualFlyConnection then 
+		manualFlyConnection:Disconnect() 
+		manualFlyConnection = nil 
+	end 
+	
+	-- Clean up BodyMovers
+	local character = player.Character
+	if character then
+		local hrp = character:FindFirstChild("HumanoidRootPart")
+		if hrp then
+			local bv = hrp:FindFirstChild("FlyBodyVelocity")
+			local bg = hrp:FindFirstChild("FlyBodyGyro")
+			if bv then bv:Destroy() end
+			if bg then bg:Destroy() end
+		end
+		
+		local hum = character:FindFirstChild("Humanoid")
+		if hum then
+			hum.PlatformStand = false
+		end
+	end
+	
+	print("Manual flying disabled") 
+end 
+
+local function toggleManualFly() 
+	if isManualFlying then 
+		disableManualFly() 
+	else 
+		enableManualFly() 
+	end 
+end 
+
+local function processComputer(computerModel) 
+	if not hasPrompts(computerModel) then 
+		warn("Computer has no Prompts folder, moving to next...") 
+		return false 
+	end 
+	
+	print("Found computer with Prompts!") 
+	
+	local targetMesh = findTargetMesh(computerModel) 
+	if not targetMesh then 
+		warn("Computer has all positions occupied by other players") 
+		print("🔄 Trying next computer...")
+		task.wait(1)
+		findAndProcessNextComputer()
+		return false 
+	end 
+	
+	print("Found target mesh, moving to it...") 
+	
+	local meshPosition 
+	if targetMesh:IsA("BasePart") then 
+		meshPosition = targetMesh.Position 
+		print(string.format("📍 Flying to BasePart at: (%.1f, %.1f, %.1f)", 
+			meshPosition.X, meshPosition.Y, meshPosition.Z))
+	elseif targetMesh.Parent and targetMesh.Parent:IsA("BasePart") then 
+		meshPosition = targetMesh.Parent.Position 
+		print(string.format("📍 Flying to Parent BasePart at: (%.1f, %.1f, %.1f)", 
+			meshPosition.X, meshPosition.Y, meshPosition.Z))
+	else 
+		warn("Could not determine mesh position") 
+		return false 
+	end 
+	
+	-- Fly to 3 studs above the mesh to avoid clipping
+	flyTo(meshPosition + Vector3.new(0, 3, 0), function() 
+		print("✅ Arrived at computer")
+		
+		-- RE-CHECK: Verify our position is still available (someone might have taken it while we were flying)
+		print("🔍 Re-checking if position is still available...")
+		local character = player.Character
+		if character then
+			local hrp = character:FindFirstChild("HumanoidRootPart")
+			if hrp then
+				local myPosition = hrp.Position
+				
+				-- Check if any other player is at our position
+				for _, otherPlayer in ipairs(Players:GetPlayers()) do
+					if otherPlayer ~= player and otherPlayer.Character then
+						local otherHRP = otherPlayer.Character:FindFirstChild("HumanoidRootPart")
+						if otherHRP then
+							local distance = (otherHRP.Position - myPosition).Magnitude
+							
+							if distance < 6 then
+								local velocity = otherHRP.AssemblyLinearVelocity
+								local speed = velocity.Magnitude
+								
+								if speed < 4 then
+									print(string.format("⚠️ Position was taken while flying! %s is here (%.1f studs, speed %.1f)", 
+										otherPlayer.Name, distance, speed))
+									print("🔄 Trying different position at this computer...")
+									
+									-- Try to find a different position at THIS computer
+									local newTargetMesh = findTargetMesh(computerModel)
+									if newTargetMesh then
+										print("✅ Found different position, moving there...")
+										-- Recursively process with new position
+										processComputer(computerModel)
+										return
+									else
+										print("⚠️ No other positions available, trying different computer...")
+										task.wait(1)
+										findAndProcessNextComputer()
+										return
+									end
+								end
+							end
+						end
+					end
+				end
+				
+				print("✅ Position confirmed available!")
+			end
+		end
+		
+		-- Wait 3 seconds on ground
+		print("⏳ Waiting 3 seconds...")
+		task.wait(3)
+		
+		-- If Comp Hide is enabled, go underground
+		if compHideEnabled then
+			local character = player.Character
+			if character then
+				local hrp = character:FindFirstChild("HumanoidRootPart")
+				if hrp then
+					local currentPos = hrp.Position
+					-- Go down 7 studs underground
+					local targetPos = currentPos - Vector3.new(0, 7, 0)
+					hrp.CFrame = CFrame.new(targetPos)
+					print("🔽 Hiding underground (7 studs down)")
+				end
+			end
+		end
+		
+		print("Pressing E every 2 seconds...")
+		
+		-- Stop any existing E press loop 
+		if currentEPressLoop then 
+			currentEPressLoop = false 
+		end 
+		
+		-- Start new E press loop 
+		local loopActive = true 
+		currentEPressLoop = loopActive 
+		
+		-- Function to check if our current position got occupied by someone else
+		local function checkPositionStillAvailable()
+			local character = player.Character
+			if not character then return true end
+			
+			local hrp = character:FindFirstChild("HumanoidRootPart")
+			if not hrp then return true end
+			
+			local myPosition = hrp.Position
+			
+			-- Check if any other player is too close to us
+			for _, otherPlayer in ipairs(Players:GetPlayers()) do
+				if otherPlayer ~= player and otherPlayer.Character then
+					local otherHRP = otherPlayer.Character:FindFirstChild("HumanoidRootPart")
+					if otherHRP then
+						local distance = (otherHRP.Position - myPosition).Magnitude
+						
+						if distance < 5 then
+							local velocity = otherHRP.AssemblyLinearVelocity
+							local speed = velocity.Magnitude
+							
+							if speed < 4 then
+								print(string.format("⚠️ Position compromised! %s is %.1f studs away (speed: %.1f)", 
+									otherPlayer.Name, distance, speed))
+								return false, otherPlayer.Name
+							end
+						end
+					end
+				end
+			end
+			
+			return true
+		end
+		
+		-- Proximity check loop (runs every 6 seconds)
+		local proximityCheckActive = true
+		task.spawn(function()
+			while proximityCheckActive and currentEPressLoop == loopActive do
+				task.wait(6)
+				
+				if not proximityCheckActive then break end
+				
+				local stillAvailable, intruderName = checkPositionStillAvailable()
+				if not stillAvailable then
+					print(string.format("🚨 Someone (%s) took our position! Moving to different computer...", intruderName))
+					
+					-- Stop ALL loops immediately
+					loopActive = false
+					proximityCheckActive = false
+					animationCheckActive = false
+					currentEPressLoop = nil
+					
+					blacklistedComputers[computerModel] = true
+					
+					print("⏸️ Stopping all loops...")
+					task.wait(1) -- Wait for loops to fully stop
+					findAndProcessNextComputer()
+					break
+				end
+			end
+		end)
+		
+		task.spawn(function() 
+			while loopActive and currentEPressLoop == loopActive do 
+				-- Safety check: don't press E if flying 
+				if isFlying then 
+					task.wait(0.5) 
+					continue 
+				end 
+				
+				if not hasPrompts(computerModel) then 
+					print("Computer completed (no more Prompts folder)") 
+					currentEPressLoop = nil 
+					animationCheckActive = false
+					proximityCheckActive = false
+					
+					-- Rise back up 2 studs before moving to next computer
+					local character = player.Character
+					if character then
+						local hrp = character:FindFirstChild("HumanoidRootPart")
+						if hrp then
+							local currentPos = hrp.Position
+							local targetPos = currentPos + Vector3.new(0, 2, 0)
+							hrp.CFrame = CFrame.new(targetPos)
+							print("🔼 Moved up 2 studs (ready for flight)")
+						end
+					end
+					
+					-- Automatically move to next computer 
+					print("⚡ Auto-moving to next computer...") 
+					task.wait(0.5) -- Small delay before moving to next 
+					findAndProcessNextComputer() 
+					break 
+				end 
+				
+				print("Pressing E...") 
+				pressE() 
+				task.wait(2) 
+			end 
+		end) 
+	end) 
+	
+	return true 
+end 
+
+local function findAndProcessNextComputer() 
+	print("🔍 Rescanning for computers with Prompts...") 
+	
+	-- Rescan workspace for computers (don't use cached list) 
+	local availableComputers = {} 
+	for _, obj in ipairs(workspace:GetDescendants()) do 
+		if obj.Name == "Computer" and obj:IsA("Model") then 
+			if hasPrompts(obj) then 
+				-- Check if this computer is blacklisted (being camped)
+				local isBlacklisted = false
+				for blacklistedComp, _ in pairs(blacklistedComputers) do
+					if blacklistedComp == obj then
+						isBlacklisted = true
+						break
+					end
+				end
+				
+				if not isBlacklisted then
+					table.insert(availableComputers, obj)
+				else
+					print(string.format("⚠️ Skipping blacklisted computer (being camped)"))
+				end
+			end 
+		end 
+	end 
+	
+	if #availableComputers == 0 then 
+		-- Check if all computers are blacklisted
+		local allBlacklisted = false
+		for _, obj in ipairs(workspace:GetDescendants()) do
+			if obj.Name == "Computer" and obj:IsA("Model") and hasPrompts(obj) then
+				for blacklistedComp, _ in pairs(blacklistedComputers) do
+					if blacklistedComp == obj then
+						allBlacklisted = true
+						break
+					end
+				end
+			end
+		end
+		
+		if allBlacklisted then
+			print("⚠️ All remaining computers are being camped by animatronics!")
+			print("☁️ Flying to sky to wait safely...")
+			
+			-- Fly to sky and wait
+			local character = player.Character
+			if character then
+				local hrp = character:FindFirstChild("HumanoidRootPart")
+				if hrp then
+					local skyPosition = hrp.Position + Vector3.new(0, 100, 0)
+					hrp.CFrame = CFrame.new(skyPosition)
+					print("☁️ Waiting in sky (100 studs up)")
+				end
+			end
+			
+			print("💤 Waiting 15 seconds before trying again...")
+			task.wait(15)
+			-- Clear blacklist and try again
+			blacklistedComputers = {}
+			findAndProcessNextComputer()
+			return
+		else
+			warn("⚠️ No computers with Prompts folder found!")
+			print("☁️ All computers completed - waiting in sky...")
+			
+			-- Fly to sky and wait
+			local character = player.Character
+			if character then
+				local hrp = character:FindFirstChild("HumanoidRootPart")
+				if hrp then
+					local skyPosition = hrp.Position + Vector3.new(0, 150, 0)
+					hrp.CFrame = CFrame.new(skyPosition)
+					print("☁️ Hovering in sky (150 studs up) - all computers done!")
+				end
+			end
+			return
+		end
+	end 
+	
+	print(string.format("✅ Found %d computers with Prompts", #availableComputers)) 
+	
+	-- Shuffle the available computers 
+	for i = #availableComputers, 2, -1 do 
+		local j = math.random(i) 
+		availableComputers[i], availableComputers[j] = availableComputers[j], availableComputers[i] 
+	end 
+	
+	-- Try to process the first available computer 
+	for _, computerModel in ipairs(availableComputers) do 
+		if processComputer(computerModel) then 
+			return 
+		end 
+	end 
+	
+	warn("⚠️ Could not process any computers!") 
+end 
+
+local function scanForAnimatronics() 
+	-- Only scan if we haven't found any animatronics yet 
+	if next(detectedAnimatronics) ~= nil then 
+		print("ℹ️ Animatronics already identified, skipping rescan") 
+		return 
+	end 
+	
+	print("🔍 Scanning for animatronics...") 
+	local foundCount = 0 
+	
+	for _, plr in ipairs(Players:GetPlayers()) do 
+		if plr ~= player then 
+			local playerModel = workspace:FindFirstChild(plr.Name) 
+			if playerModel and playerModel:IsA("Model") then 
+				local animationsFolder = playerModel:FindFirstChild("Animations") 
+				if animationsFolder and animationsFolder:IsA("Folder") then 
+					detectedAnimatronics[plr.Name] = playerModel 
+					foundCount = foundCount + 1 
+					print("🤖 Detected animatronic player:", plr.Name) 
+				end 
+			end 
+		end 
+	end 
+	
+	if foundCount > 0 then 
+		print(string.format("✅ Animatronic scan complete! Found %d animatronic(s)", foundCount)) 
+	else 
+		print("ℹ️ No animatronics detected") 
+	end 
+end 
+
+-- Raycast visualization settings
+local visualizeRaycasts = true -- Set to true to see raycasts
+
+local function createRaycastVisualization(rayOrigin, rayDirection, rayDistance, blocked, hitPosition)
+	if not visualizeRaycasts then return end
+	
+	-- Create the ray beam as a Part
+	local beam = Instance.new("Part")
+	beam.Name = "RaycastBeam"
+	beam.Anchored = true
+	beam.CanCollide = false
+	beam.Size = Vector3.new(0.2, 0.2, rayDistance)
+	beam.CFrame = CFrame.new(rayOrigin, rayOrigin + rayDirection) * CFrame.new(0, 0, -rayDistance / 2)
+	beam.Material = Enum.Material.Neon
+	
+	if blocked then
+		beam.Color = Color3.fromRGB(0, 255, 0) -- Green if blocked (safe)
+	else
+		beam.Color = Color3.fromRGB(255, 0, 0) -- Red if clear line of sight (danger)
+	end
+	
+	beam.Transparency = 0.3
+	beam.Parent = workspace
+	
+	-- Create start marker (animatronic eyes)
+	local startMarker = Instance.new("Part")
+	startMarker.Name = "RayStart"
+	startMarker.Shape = Enum.PartType.Ball
+	startMarker.Size = Vector3.new(1, 1, 1)
+	startMarker.Position = rayOrigin
+	startMarker.Anchored = true
+	startMarker.CanCollide = false
+	startMarker.Material = Enum.Material.Neon
+	startMarker.Color = Color3.fromRGB(255, 0, 0) -- Red for animatronic
+	startMarker.Transparency = 0.3
+	startMarker.Parent = workspace
+	
+	-- Create end marker (hit point or player)
+	local endMarker = Instance.new("Part")
+	endMarker.Name = "RayEnd"
+	endMarker.Shape = Enum.PartType.Ball
+	endMarker.Size = Vector3.new(1, 1, 1)
+	endMarker.Position = hitPosition or (rayOrigin + rayDirection)
+	endMarker.Anchored = true
+	endMarker.CanCollide = false
+	endMarker.Material = Enum.Material.Neon
+	
+	if blocked then
+		endMarker.Color = Color3.fromRGB(0, 255, 0) -- Green if blocked
+		endMarker.Shape = Enum.PartType.Block -- Cube for obstacles
+	else
+		endMarker.Color = Color3.fromRGB(255, 165, 0) -- Orange if player visible
+	end
+	
+	endMarker.Transparency = 0.3
+	endMarker.Parent = workspace
+	
+	-- Auto cleanup after 2 seconds
+	task.delay(2, function()
+		if beam and beam.Parent then beam:Destroy() end
+		if startMarker and startMarker.Parent then startMarker:Destroy() end
+		if endMarker and endMarker.Parent then endMarker:Destroy() end
+	end)
+end
+
+local function isAnimatronicNearby() 
+	local character = player.Character 
+	if not character then return false end 
+	
+	local hrp = character:FindFirstChild("HumanoidRootPart") 
+	if not hrp then return false end 
+	
+	-- Get player's head position for more accurate line-of-sight 
+	local playerHead = character:FindFirstChild("Head") 
+	local playerEyePosition = playerHead and (playerHead.Position + Vector3.new(0, 0.5, 0)) or (hrp.Position + Vector3.new(0, 2, 0)) 
+	
+	for animName, animModel in pairs(detectedAnimatronics) do 
+		if animModel.Parent then 
+			local animHRP = animModel:FindFirstChild("HumanoidRootPart") or animModel:FindFirstChildWhichIsA("BasePart") 
+			if animHRP then 
+				-- Calculate 3D distance (includes X, Y, Z) 
+				local distance = (hrp.Position - animHRP.Position).Magnitude 
+				
+				-- Also calculate horizontal and vertical distances for debugging 
+				local horizontalDistance = math.sqrt( 
+					(hrp.Position.X - animHRP.Position.X)^2 + 
+					(hrp.Position.Z - animHRP.Position.Z)^2 
+				) 
+				local verticalDistance = math.abs(hrp.Position.Y - animHRP.Position.Y) 
+				
+				if distance <= detectionRadius then 
+					-- CRITICAL DISTANCE: If very close, always escape (no raycast needed) 
+					if distance <= 20 then 
+						print(string.format("🚨 ANIMATRONIC VERY CLOSE: %s | Distance: %d studs - IMMEDIATE ESCAPE!", 
+							animName, math.floor(distance))) 
+						return true, animName 
+					end 
+					
+					-- Check vertical distance - if on different floors, be more strict 
+					if verticalDistance > 8 then 
+						-- Likely on different floors - only escape if horizontal distance is also very close 
+						if horizontalDistance > 25 then 
+							print(string.format("🏢 Different floors: %s | Vertical: %d | Horizontal: %d - IGNORING", 
+								animName, math.floor(verticalDistance), math.floor(horizontalDistance))) 
+							continue 
+						end
+						
+						-- Even if horizontal distance is close, do a direct vertical raycast
+						-- to verify there's actually a floor/ceiling between us
+						local raycastParams = RaycastParams.new()
+						raycastParams.FilterDescendantsInstances = {character, animModel}
+						raycastParams.FilterType = Enum.RaycastFilterType.Exclude
+						raycastParams.IgnoreWater = true
+						
+						local animHead = animModel:FindFirstChild("Head")
+						local animEyePosition = animHead and (animHead.Position + Vector3.new(0, 0.5, 0)) or (animHRP.Position + Vector3.new(0, 2, 0))
+						local verticalRayResult = workspace:Raycast(animEyePosition, (playerEyePosition - animEyePosition), raycastParams)
+						
+						if verticalRayResult then
+							local hitY = verticalRayResult.Position.Y
+							local animY = animEyePosition.Y
+							local playerY = playerEyePosition.Y
+							local minY = math.min(animY, playerY)
+							local maxY = math.max(animY, playerY)
+							
+							-- If hit is between the two heights, there's a floor/ceiling blocking
+							if hitY > minY and hitY < maxY then
+								print(string.format("🛡️ Floor/ceiling between us: %s | Vertical: %d - SAFE",
+									animName, math.floor(verticalDistance)))
+								continue
+							end
+						end
+					end 
+					
+					-- RAYCAST LINE-OF-SIGHT CHECK for medium distances (IMPROVED CONE)
+					local animHead = animModel:FindFirstChild("Head")
+					local animEyePosition = animHead and (animHead.Position + Vector3.new(0, 0.5, 0)) or (animHRP.Position + Vector3.new(0, 2, 0))
+					
+					local raycastParams = RaycastParams.new()
+					raycastParams.FilterDescendantsInstances = {character, animModel}
+					raycastParams.FilterType = Enum.RaycastFilterType.Exclude
+					raycastParams.IgnoreWater = true
+					
+					local baseDirection = (playerEyePosition - animEyePosition).Unit
+					local rayDistance = (playerEyePosition - animEyePosition).Magnitude
+					
+					-- 9 rays in wider cone for better coverage
+					local rayDirections = {}
+					local spreadAngle = 0.26 -- ~15 degrees
+					
+					table.insert(rayDirections, baseDirection)
+					
+					local rightVector = Vector3.new(-baseDirection.Z, 0, baseDirection.X).Unit
+					local upVector = Vector3.new(0, 1, 0)
+					
+					table.insert(rayDirections, (baseDirection + rightVector * spreadAngle).Unit)
+					table.insert(rayDirections, (baseDirection - rightVector * spreadAngle).Unit)
+					table.insert(rayDirections, (baseDirection + upVector * spreadAngle).Unit)
+					table.insert(rayDirections, (baseDirection - upVector * spreadAngle).Unit)
+					
+					-- Diagonals
+					table.insert(rayDirections, (baseDirection + rightVector * spreadAngle * 0.7 + upVector * spreadAngle * 0.7).Unit)
+					table.insert(rayDirections, (baseDirection - rightVector * spreadAngle * 0.7 + upVector * spreadAngle * 0.7).Unit)
+					table.insert(rayDirections, (baseDirection + rightVector * spreadAngle * 0.7 - upVector * spreadAngle * 0.7).Unit)
+					table.insert(rayDirections, (baseDirection - rightVector * spreadAngle * 0.7 - upVector * spreadAngle * 0.7).Unit)
+					
+					local clearRayCount = 0
+					local totalRays = #rayDirections
+					local hitResults = {}
+					
+					for i, direction in ipairs(rayDirections) do
+						local raycastResult = workspace:Raycast(animEyePosition, direction * rayDistance, raycastParams)
+						
+						if not raycastResult then
+							clearRayCount = clearRayCount + 1
+							table.insert(hitResults, {blocked = false, direction = direction})
+						else
+							local hitPart = raycastResult.Instance
+							local hitDistance = (raycastResult.Position - animEyePosition).Magnitude
+							
+							-- Simplified floor/ceiling check
+							if verticalDistance > 5 then
+								local hitY = raycastResult.Position.Y
+								local animY = animEyePosition.Y
+								local playerY = playerEyePosition.Y
+								local minY = math.min(animY, playerY)
+								local maxY = math.max(animY, playerY)
+								
+								if hitY > minY + 2 and hitY < maxY - 2 then
+									table.insert(hitResults, {blocked = true, reason = "floor", direction = direction, hitPos = raycastResult.Position})
+									continue
+								end
+							end
+							
+							-- Simplified obstacle check (size > 1 stud)
+							if hitPart.CanCollide and hitDistance < (rayDistance * 0.95) then
+								local obstacleSize = hitPart.Size.Magnitude
+								if obstacleSize > 1 then
+									table.insert(hitResults, {blocked = true, reason = "obstacle", direction = direction, hitPos = raycastResult.Position})
+									continue
+								end
+							end
+							
+							clearRayCount = clearRayCount + 1
+							table.insert(hitResults, {blocked = false, direction = direction})
+						end
+					end
+					
+					if visualizeRaycasts then
+						for _, result in ipairs(hitResults) do
+							local hitPos = result.hitPos or (result.blocked and animEyePosition + result.direction * rayDistance or playerEyePosition)
+							createRaycastVisualization(animEyePosition, result.direction * rayDistance, rayDistance, result.blocked, hitPos)
+						end
+					end
+					
+					-- LOWERED: 40% threshold (4/9 rays clear = detected)
+					local clearPercentage = (clearRayCount / totalRays) * 100
+					if clearPercentage >= 40 then
+						print(string.format("🚨 LINE OF SIGHT: %s | Dist: %d | Clear: %d/%d (%.0f%%)", animName, math.floor(distance), clearRayCount, totalRays, clearPercentage))
+						return true, animName
+					else
+						print(string.format("🛡️ BLOCKED: %s | Dist: %d | Clear: %d/%d (%.0f%%)", animName, math.floor(distance), clearRayCount, totalRays, clearPercentage))
+						continue
+					end
+				end
+			end
+		end 
+	
+				end
+	return false 
+end 
+
+local function findSafeComputer() 
+	-- Get all available computers with Prompts 
+	local availableComputers = {} 
+	for _, computerModel in ipairs(computers) do 
+		if hasPrompts(computerModel) then 
+			table.insert(availableComputers, computerModel) 
+		end 
+	end 
+	
+	if #availableComputers == 0 then 
+		warn("⚠️ No computers available!") 
+		return nil 
+	end 
+	
+	-- Get player position 
+	local character = player.Character 
+	if not character then return availableComputers[1] end 
+	
+	local hrp = character:FindFirstChild("HumanoidRootPart") 
+	if not hrp then return availableComputers[1] end 
+	
+	local playerPos = hrp.Position 
+	
+	-- Score each computer based on safety 
+	local scoredComputers = {} 
+	
+	for _, computerModel in ipairs(availableComputers) do 
+		local computerPart = computerModel.PrimaryPart or computerModel:FindFirstChildWhichIsA("BasePart") 
+		if computerPart then 
+			local computerPos = computerPart.Position 
+			local score = 0 
+			local minAnimDistance = math.huge 
+			local nearbyAnimCount = 0 
+			
+			-- Check distance to each animatronic 
+			for animName, animModel in pairs(detectedAnimatronics) do 
+				if animModel.Parent then 
+					local animHRP = animModel:FindFirstChild("HumanoidRootPart") or animModel:FindFirstChildWhichIsA("BasePart") 
+					if animHRP then 
+						local animPos = animHRP.Position 
+						local distanceToComputer = (computerPos - animPos).Magnitude 
+						
+						-- Track closest animatronic to this computer 
+						if distanceToComputer < minAnimDistance then 
+							minAnimDistance = distanceToComputer 
+						end 
+						
+						-- Count how many animatronics are dangerously close 
+						if distanceToComputer < detectionRadius * 1.5 then 
+							nearbyAnimCount = nearbyAnimCount + 1 
+						end 
+					end 
+				end 
+			end 
+			
+			-- Scoring system: 
+			-- Higher score = safer computer 
+			score = minAnimDistance -- Base score is distance to nearest animatronic 
+			score = score - (nearbyAnimCount * 20) -- Penalty for multiple nearby animatronics 
+			
+			table.insert(scoredComputers, { 
+				model = computerModel, 
+				score = score, 
+				minAnimDistance = minAnimDistance, 
+				nearbyAnimCount = nearbyAnimCount 
+			}) 
+		end 
+	end 
+	
+	-- Sort by safety score (highest first) 
+	table.sort(scoredComputers, function(a, b) 
+		return a.score > b.score 
+	end) 
+	
+	-- Return the safest computer 
+	if #scoredComputers > 0 then 
+		local safest = scoredComputers[1] 
+		print(string.format("✅ Found safe computer | Distance from nearest animatronic: %d studs | Nearby threats: %d", 
+			math.floor(safest.minAnimDistance), safest.nearbyAnimCount)) 
+		return safest.model 
+	end 
+	
+	return nil 
+end 
+
+local function emergencyVerticalEscape() 
+	local character = player.Character 
+	if not character then return end 
+	
+	local hrp = character:FindFirstChild("HumanoidRootPart") 
+	if not hrp then return end 
+	
+	print("🚨 EMERGENCY VERTICAL ESCAPE! Flying straight up!") 
+	
+	local targetHeight = 150 
+	local targetPos = hrp.Position + Vector3.new(0, targetHeight, 0) 
+	
+	isFlying = true 
+	local startPos = hrp.Position 
+	local travelTime = targetHeight / (flySpeed * 1.5) -- Faster vertical escape 
+	local startTime = tick() 
+	
+	local escapeConnection 
+	escapeConnection = RunService.RenderStepped:Connect(function() 
+		if not character.Parent then 
+			escapeConnection:Disconnect() 
+			isFlying = false 
+			return 
+		end 
+		
+		local elapsed = tick() - startTime 
+		local alpha = math.min(elapsed / travelTime, 1) 
+		
+		hrp.CFrame = CFrame.new(startPos:Lerp(targetPos, alpha)) 
+		hrp.AssemblyLinearVelocity = Vector3.new(0, 0, 0) 
+		
+		if alpha >= 1 then 
+			escapeConnection:Disconnect() 
+			isFlying = false 
+			print("✅ Reached safe altitude!") 
+			
+			-- Stay in the air for a bit 
+			task.wait(3) 
+			
+			-- Try to find a safe computer now 
+			print("🔍 Looking for safe computer from above...") 
+			local safeComputer = findSafeComputer() 
+			if safeComputer then 
+				processSpecificComputer(safeComputer) 
+			else 
+				print("⚠️ Still no safe computers, staying in the air...") 
+			end 
+		end 
+	end) 
+end 
+
+local function processSpecificComputer(computerModel) 
+	if not computerModel then 
+		warn("No computer provided to process") 
+		return false 
+	end 
+	
+	if not hasPrompts(computerModel) then 
+		warn("Computer has no Prompts folder (marked Done)") 
+		return false 
+	end 
+	
+	print("Processing computer...") 
+	
+	local targetMesh = findTargetMesh(computerModel) 
+	if not targetMesh then 
+		warn("Computer has all positions occupied by other players") 
+		print("🔄 Trying next computer...")
+		task.wait(1)
+		findAndProcessNextComputer()
+		return false 
+	end 
+	
+	print("Found target mesh, moving to it...") 
+	
+	local meshPosition 
+	if targetMesh:IsA("BasePart") then 
+		meshPosition = targetMesh.Position 
+		print(string.format("📍 Flying to BasePart at: (%.1f, %.1f, %.1f)", 
+			meshPosition.X, meshPosition.Y, meshPosition.Z))
+	elseif targetMesh.Parent and targetMesh.Parent:IsA("BasePart") then 
+		meshPosition = targetMesh.Parent.Position 
+		print(string.format("📍 Flying to Parent BasePart at: (%.1f, %.1f, %.1f)", 
+			meshPosition.X, meshPosition.Y, meshPosition.Z))
+	else 
+		warn("Could not determine mesh position") 
+		return false 
+	end 
+	
+	-- Fly to 3 studs above the mesh to avoid clipping
+	flyTo(meshPosition + Vector3.new(0, 3, 0), function() 
+		print("✅ Arrived at computer")
+		
+		-- RE-CHECK: Verify our position is still available (someone might have taken it while we were flying)
+		print("🔍 Re-checking if position is still available...")
+		local character = player.Character
+		if character then
+			local hrp = character:FindFirstChild("HumanoidRootPart")
+			if hrp then
+				local myPosition = hrp.Position
+				
+				-- Check if any other player is at our position
+				for _, otherPlayer in ipairs(Players:GetPlayers()) do
+					if otherPlayer ~= player and otherPlayer.Character then
+						local otherHRP = otherPlayer.Character:FindFirstChild("HumanoidRootPart")
+						if otherHRP then
+							local distance = (otherHRP.Position - myPosition).Magnitude
+							
+							if distance < 6 then
+								local velocity = otherHRP.AssemblyLinearVelocity
+								local speed = velocity.Magnitude
+								
+								if speed < 4 then
+									print(string.format("⚠️ Position was taken while flying! %s is here (%.1f studs, speed %.1f)", 
+										otherPlayer.Name, distance, speed))
+									print("🔄 Trying different position at this computer...")
+									
+									-- Try to find a different position at THIS computer
+									local newTargetMesh = findTargetMesh(computerModel)
+									if newTargetMesh then
+										print("✅ Found different position, moving there...")
+										-- Recursively process with new position
+										processComputer(computerModel)
+										return
+									else
+										print("⚠️ No other positions available, trying different computer...")
+										task.wait(1)
+										findAndProcessNextComputer()
+										return
+									end
+								end
+							end
+						end
+					end
+				end
+				
+				print("✅ Position confirmed available!")
+			end
+		end
+		
+		-- Wait 3 seconds on ground
+		print("⏳ Waiting 3 seconds...")
+		task.wait(3)
+		
+		-- If Comp Hide is enabled, go underground
+		if compHideEnabled then
+			local character = player.Character
+			if character then
+				local hrp = character:FindFirstChild("HumanoidRootPart")
+				if hrp then
+					local currentPos = hrp.Position
+					-- Go down 7 studs underground
+					local targetPos = currentPos - Vector3.new(0, 7, 0)
+					hrp.CFrame = CFrame.new(targetPos)
+					print("🔽 Hiding underground (7 studs down)")
+				end
+			end
+		end
+		
+		print("Pressing E every 2 seconds...")
+		
+		-- Stop any existing E press loop 
+		if currentEPressLoop then 
+			currentEPressLoop = false 
+		end 
+		
+		-- Start new E press loop 
+		local loopActive = true 
+		currentEPressLoop = loopActive 
+		
+		-- Function to check if our current position got occupied by someone else
+		local function checkPositionStillAvailable()
+			local character = player.Character
+			if not character then return true end
+			
+			local hrp = character:FindFirstChild("HumanoidRootPart")
+			if not hrp then return true end
+			
+			local myPosition = hrp.Position
+			
+			-- Check if any other player is too close to us
+			for _, otherPlayer in ipairs(Players:GetPlayers()) do
+				if otherPlayer ~= player and otherPlayer.Character then
+					local otherHRP = otherPlayer.Character:FindFirstChild("HumanoidRootPart")
+					if otherHRP then
+						local distance = (otherHRP.Position - myPosition).Magnitude
+						
+						if distance < 5 then
+							local velocity = otherHRP.AssemblyLinearVelocity
+							local speed = velocity.Magnitude
+							
+							if speed < 4 then
+								print(string.format("⚠️ Position compromised! %s is %.1f studs away (speed: %.1f)", 
+									otherPlayer.Name, distance, speed))
+								return false, otherPlayer.Name
+							end
+						end
+					end
+				end
+			end
+			
+			return true
+		end
+		
+		-- Proximity check loop (runs every 6 seconds)
+		local proximityCheckActive = true
+		task.spawn(function()
+			while proximityCheckActive and currentEPressLoop == loopActive do
+				task.wait(6)
+				
+				if not proximityCheckActive then break end
+				
+				local stillAvailable, intruderName = checkPositionStillAvailable()
+				if not stillAvailable then
+					print(string.format("🚨 Someone (%s) took our position! Moving to different computer...", intruderName))
+					
+					-- Stop ALL loops immediately
+					loopActive = false
+					proximityCheckActive = false
+					animationCheckActive = false
+					currentEPressLoop = nil
+					
+					blacklistedComputers[computerModel] = true
+					
+					print("⏸️ Stopping all loops...")
+					task.wait(1) -- Wait for loops to fully stop
+					findAndProcessNextComputer()
+					break
+				end
+			end
+		end)
+		
+		task.spawn(function() 
+			while loopActive and currentEPressLoop == loopActive do 
+				-- Safety check: don't press E if flying 
+				if isFlying then 
+					task.wait(0.5) 
+					continue 
+				end 
+				
+				if not hasPrompts(computerModel) then 
+					print("Computer completed (no more Prompts folder)") 
+					currentEPressLoop = nil 
+					animationCheckActive = false
+					proximityCheckActive = false
+					
+					-- Rise back up 2 studs before moving to next computer
+					local character = player.Character
+					if character then
+						local hrp = character:FindFirstChild("HumanoidRootPart")
+						if hrp then
+							local currentPos = hrp.Position
+							local targetPos = currentPos + Vector3.new(0, 2, 0)
+							hrp.CFrame = CFrame.new(targetPos)
+							print("🔼 Moved up 2 studs (ready for flight)")
+						end
+					end
+					
+					-- Automatically move to next computer 
+					print("⚡ Auto-moving to next computer...") 
+					task.wait(0.5) -- Small delay before moving to next 
+					findAndProcessNextComputer() 
+					break 
+				end 
+				
+				print("Pressing E...") 
+				pressE() 
+				task.wait(2) 
+			end 
+		end) 
+	end) 
+	
+	return true 
+end 
+
+local function startAnimatronicDetection() 
+	-- Scan once at startup 
+	scanForAnimatronics() 
+	
+	-- Remove the repeated scanning loop - we only scan once now 
+	
+	if animatronicCheckConnection then 
+		animatronicCheckConnection:Disconnect() 
+	end 
+	
+	animatronicCheckConnection = RunService.Heartbeat:Connect(function() 
+		if not animatronicDetectionEnabled then return end 
+		if isFlying then return end 
+		
+		if tick() - lastEscapeTime < escapeCooldown then return end 
+		
+		local detected, animName = isAnimatronicNearby() 
+		if detected then 
+			print("🚨 ESCAPING FROM ANIMATRONIC PLAYER:", animName) 
+			lastEscapeTime = tick() 
+			
+			-- Try to find a safe computer first 
+			local safeComputer = findSafeComputer() 
+			if safeComputer then 
+				print("🎯 Escaping to safe computer...") 
+				processSpecificComputer(safeComputer) 
+			else 
+				-- No safe computers available - emergency vertical escape 
+				print("⚠️ No safe computers available!") 
+				emergencyVerticalEscape() 
+			end 
+		end 
+	end) 
+end 
+
+hideButton.MouseButton1Click:Connect(toggleHide) 
+
+compHideButton.MouseButton1Click:Connect(function()
+	compHideEnabled = not compHideEnabled
+	if compHideEnabled then
+		compHideButton.Text = "🔽 COMP HIDE: ON"
+		compHideButton.BackgroundColor3 = Color3.fromRGB(0, 200, 0)
+		print("Computer hiding ENABLED - will go underground at computers")
+	else
+		compHideButton.Text = "🔽 COMP HIDE: OFF"
+		compHideButton.BackgroundColor3 = Color3.fromRGB(229, 9, 20)
+		print("Computer hiding DISABLED - will stay at ground level")
+	end
+end)
+
+stopEButton.MouseButton1Click:Connect(function()
+	if currentEPressLoop then
+		currentEPressLoop = false
+		print("🛑 Stopped E pressing")
+	else
+		print("ℹ️ E pressing is not active")
+	end
+end) 
+
+local function warpToRandomPlayer() 
+	local otherPlayers = {} 
+	
+	for _, plr in ipairs(Players:GetPlayers()) do 
+		if plr ~= player and plr.Character then 
+			local hrp = plr.Character:FindFirstChild("HumanoidRootPart") 
+			if hrp then 
+				table.insert(otherPlayers, plr) 
+			end 
+		end 
+	end 
+	
+	if #otherPlayers == 0 then 
+		warn("No other players found!") 
+		return 
+	end 
+	
+	local randomPlayer = otherPlayers[math.random(1, #otherPlayers)] 
+	local targetHRP = randomPlayer.Character:FindFirstChild("HumanoidRootPart") 
+	
+	if not targetHRP then 
+		warn("Target player has no HumanoidRootPart!") 
+		return 
+	end 
+	
+	print("Warping to player:", randomPlayer.Name) 
+	
+	flyTo(targetHRP.Position + Vector3.new(0, 5, 0), function() 
+		print("Arrived at player:", randomPlayer.Name) 
+	end) 
+end 
+
+warpPlayerButton.MouseButton1Click:Connect(warpToRandomPlayer) 
+
+UserInputService.InputBegan:Connect(function(input, gp) 
+	if gp then return end 
+	
+	if input.KeyCode == Enum.KeyCode.H then 
+		print("H pressed - teleporting to computer") 
+		findAndProcessNextComputer() 
+	elseif input.KeyCode == Enum.KeyCode.J then 
+		healthSafetyEnabled = not healthSafetyEnabled 
+		print("Health safety toggled:", healthSafetyEnabled) 
+		
+		if not healthSafetyEnabled then 
+			stopFlying() 
+		end 
+		
+		updateStatus() 
+	elseif input.KeyCode == Enum.KeyCode.L then 
+		espEnabled = not espEnabled 
+		print("ESP toggled:", espEnabled) 
+		
+		if not espEnabled then 
+			for obj, data in pairs(espObjects) do 
+				if data.highlight and data.highlight.Parent then 
+					data.highlight:Destroy() 
+				end 
+				if data.label and data.label.Parent then 
+					data.label:Destroy() 
+				end 
+			end 
+			espObjects = {} 
+			
+			local espGui = playerGui:FindFirstChild("ESPGui") 
+			if espGui then 
+				espGui:Destroy() 
+			end 
+		else 
+			scanForESPObjects() 
+		end 
+		
+		updateStatus() 
+	elseif input.KeyCode == Enum.KeyCode.T then 
+		toggleManualFly() 
+	elseif input.KeyCode == Enum.KeyCode.K then 
+		animatronicDetectionEnabled = not animatronicDetectionEnabled 
+		print("Animatronic detection toggled:", animatronicDetectionEnabled) 
+		updateStatus() 
+	elseif input.KeyCode == Enum.KeyCode.P then 
+		autoHeartbeatEnabled = not autoHeartbeatEnabled 
+		print("Heartbeat automation toggled:", autoHeartbeatEnabled) 
+		if not autoHeartbeatEnabled then 
+			puzzleStartTime = nil 
+			trackedBeats = {} 
+			clickedBeats = {} 
+			clickCount = 0 
+			hitLineX = nil 
+			beatIdCounter = 0 
+			if beatConnection then 
+				beatConnection:Disconnect() 
+				beatConnection = nil 
+			end 
+			disableBlackout() 
+		end 
+		updateStatus() 
+	elseif input.KeyCode == Enum.KeyCode.V then
+		visualizeRaycasts = not visualizeRaycasts
+		print("Raycast visualization toggled:", visualizeRaycasts)
+		updateStatus()
+	end 
+end) 
+
+local lastHealth = nil 
+local damageConnection = nil 
+
+local function setupDamageDetection() 
+	local character = player.Character 
+	if not character then return end 
+	
+	local humanoid = character:FindFirstChildOfClass("Humanoid") 
+	if not humanoid then return end 
+	
+	lastHealth = humanoid.Health 
+	
+	if damageConnection then 
+		damageConnection:Disconnect() 
+	end 
+	
+	damageConnection = humanoid.HealthChanged:Connect(function(health) 
+		if health < lastHealth and healthSafetyEnabled then 
+			print("Damage detected! Flying up...") 
+			flyUpAndStay(60) 
+		end 
+		lastHealth = health 
+	end) 
+end 
+
+player.CharacterAdded:Connect(function(character) 
+	print("Character added, setting up...") 
+	enableNoclip() 
+	task.wait(0.5) 
+	setupDamageDetection() 
+end) 
+
+if player.Character then 
+	setupDamageDetection() 
+end 
+
+task.spawn(function() 
+	while true do 
+		task.wait(1) 
+		if Clip == true then 
+			enableNoclip() 
+		end 
+	end 
+end) 
+
+updateStatus() 
+scanForESPObjects() 
+startAnimatronicDetection() 
+
+-- Start heartbeat automation monitoring   
+RunService.Heartbeat:Connect(function() 
+	if autoHeartbeatEnabled then 
+		monitorBeatsAndClick() 
+	end 
+end) 
+
+print("Script loaded successfully!") 
+print("🎵 Heartbeat automation: ENABLED (Press P to toggle)")
