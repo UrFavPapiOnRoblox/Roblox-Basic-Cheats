@@ -817,9 +817,9 @@ local function findTargetMesh(computerModel)
 				
 				local distance = (otherHRP.Position - checkPosition).Magnitude
 				
-				-- VERY TIGHT: Only 2 studs! Positions are 1.5 studs apart
+				-- VERY TIGHT: Only 1 studs! Positions are 1.5 studs apart
 				-- This ensures we only detect someone at THIS EXACT position
-				if distance < 2 then
+				if distance < 1 then
 					-- Check if they're playing a "hacking" or "typing" animation
 					local humanoid = otherPlayer.Character:FindFirstChild("Humanoid")
 					if humanoid then
